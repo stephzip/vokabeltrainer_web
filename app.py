@@ -93,6 +93,15 @@ if st.session_state.zeige_englisch:
         if pd.notna(satz) and str(satz).strip() != "":
             st.success(f"- {satz}")
 
+# 🔁 Button für nächste Vokabel direkt darunter
+if st.button("➡️ Nächste Vokabel"):
+    st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
+    st.session_state.antwort_gegeben = False
+    st.session_state.antwort_richtig = None
+    st.session_state.zeige_englisch = False
+    st.session_state.antwort = ""
+    st.rerun()  # Alternativ: st.experimental_rerun()
+
 # 📊 Modernes Statistik-Diagramm zur aktuellen Vokabel
 if st.session_state.antwort_gegeben:
     richtig = row["Richtig"] if not pd.isna(row["Richtig"]) else 0
@@ -123,12 +132,3 @@ if st.session_state.antwort_gegeben:
         ax.axis("equal")
         st.pyplot(fig)
 
-# 🔁 Button für nächste Vokabel
-if st.session_state.antwort_gegeben:
-    if st.button("➡️ Nächste Vokabel"):
-        st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
-        st.session_state.antwort_gegeben = False
-        st.session_state.antwort_richtig = None
-        st.session_state.zeige_englisch = False
-        st.session_state.antwort = ""
-        st.experimental_rerun()
