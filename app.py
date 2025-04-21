@@ -12,8 +12,7 @@ st.title("📘 Vokabeltrainer")
 
 # 🎯 Kategorieauswahl
 kategorien = df["Kategorie"].dropna().unique()
-st.write("Kategorie auswählen:")
-kategorie = st.selectbox("", kategorien)
+kategorie = st.selectbox("Kategorie auswählen:", kategorien)
 
 # 🔍 Filter nach Kategorie
 gefiltert = df[df["Kategorie"] == kategorie].reset_index(drop=True)
@@ -29,12 +28,10 @@ if "antwort_gegeben" not in st.session_state:
     st.session_state.antwort_gegeben = False
 if "antwort_richtig" not in st.session_state:
     st.session_state.antwort_richtig = None
-if "runde" not in st.session_state:
-    st.session_state.runde = 0
 if "zeige_englisch" not in st.session_state:
     st.session_state.zeige_englisch = False
-if "antwort" not in st.session_state:
-    st.session_state.antwort = ""
+if "runde" not in st.session_state:
+    st.session_state.runde = 0
 if "wechsel_timer" not in st.session_state:
     st.session_state.wechsel_timer = None
 
@@ -62,8 +59,11 @@ def antwort_pruefen():
 
 # 🧾 Eingabefeld mit Enter-Erkennung
 st.subheader(f"Übersetze: **{vokabel}**")
+
+antwort_default = st.session_state.get("antwort", "")
 antwort = st.text_input(
     "Englische Übersetzung eingeben:",
+    value=antwort_default,
     key="antwort",
     on_change=antwort_pruefen
 )
@@ -99,8 +99,8 @@ if st.button("➡️ Nächste Vokabel"):
     st.session_state.antwort_gegeben = False
     st.session_state.antwort_richtig = None
     st.session_state.zeige_englisch = False
-    st.session_state.antwort = ""
-    st.rerun()  # Alternativ: st.experimental_rerun()
+    st.session_state.pop("antwort", None)  # Eingabefeld zurücksetzen
+    st.rerun()
 
 # 📊 Modernes Statistik-Diagramm zur aktuellen Vokabel
 if st.session_state.antwort_gegeben:
@@ -131,4 +131,3 @@ if st.session_state.antwort_gegeben:
 
         ax.axis("equal")
         st.pyplot(fig)
-
