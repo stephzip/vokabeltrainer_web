@@ -31,8 +31,8 @@ if "test_ergebnisse" not in st.session_state:
 if "test_abgeschlossen" not in st.session_state:
     st.session_state.test_abgeschlossen = False
 
-# 🧪 Testmodus
-st.header("🧪 Testbereich")
+# 🎓 Testmodus
+st.header("🎓 Test")
 
 if not st.session_state.test_aktiv:
     test_kats = st.multiselect("Wähle die Kategorien für den Test:", df["Kategorie"].dropna().unique())
@@ -107,7 +107,7 @@ else:
             st.markdown(f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}</span>", unsafe_allow_html=True)
 
 st.markdown("---")  # horizontale Linie
-st.header("🏋️‍♂️ Trainingsbereich")
+st.header("🏋️‍♂️ Training")
 # 🎯 Kategorieauswahl
 kategorien = df["Kategorie"].dropna().unique()
 kategorie = st.selectbox("Kategorie auswählen:", kategorien)
