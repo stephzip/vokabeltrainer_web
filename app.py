@@ -73,6 +73,7 @@ else:
 
         if st.button("Antwort prüfen", key=f"test_check_{idx}"):
             korrekt = user_input.strip().lower() == str(row["Englisch"]).strip().lower()
+            st.session_state.test_vokabeln.at[idx, 'User_Eingabe'] = user_input
             st.session_state.test_ergebnisse.append(korrekt)
             st.session_state.test_index += 1
             if st.session_state.test_index >= 25:
@@ -104,7 +105,15 @@ else:
             frage = st.session_state.test_vokabeln.iloc[i]
             symbol = "✅" if korrekt else "❌"
             farbe = "green" if korrekt else "red"
-            st.markdown(f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}</span>", unsafe_allow_html=True)
+            eingabe = frage.get('User_Eingabe', '–')
+
+            if korrekt:
+                st.markdown(f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}</span>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}<br><i>Deine Antwort:</i> <b>{eingabe}</b></span>", unsafe_allow_html=True)
+
+
+
 
 st.markdown("---")  # horizontale Linie
 st.header("🏋️‍♂️ Training")
