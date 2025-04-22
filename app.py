@@ -85,7 +85,7 @@ else:
         falsch = len(st.session_state.test_ergebnisse) - richtig
         st.markdown(f"**Ergebnis: {richtig}/25 richtig!**")
 
-        fig, ax = plt.subplots(figsize=(2, 2))
+        fig, ax = plt.subplots(figsize=(1, 1))
         wedges, _, autotexts = ax.pie(
             [richtig, falsch],
             labels=["Richtig", "Falsch"],
