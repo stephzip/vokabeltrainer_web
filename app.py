@@ -34,6 +34,26 @@ if "runde" not in st.session_state:
     st.session_state.runde = 0
 if "wechsel_timer" not in st.session_state:
     st.session_state.wechsel_timer = None
+if "abgefragt_kategorie" not in st.session_state:
+    st.session_state.abgefragt_kategorie = {}
+
+# 🔄 Fortschrittsliste für aktuelle Kategorie initialisieren
+if kategorie not in st.session_state.abgefragt_kategorie:
+    st.session_state.abgefragt_kategorie[kategorie] = set()
+
+abgefragt_set = st.session_state.abgefragt_kategorie[kategorie]
+abgefragt_anzahl = len(abgefragt_set)
+gesamt_anzahl = len(gefiltert)
+fortschritt = abgefragt_anzahl / gesamt_anzahl
+
+# 📈 Fortschrittsanzeige
+st.markdown("### 📈 Fortschritt")
+st.progress(fortschritt)
+st.text(f"{abgefragt_anzahl} von {gesamt_anzahl} Vokabeln in dieser Kategorie abgefragt")
+
+if st.button("🔁 Fortschritt zurücksetzen"):
+    st.session_state.abgefragt_kategorie[kategorie] = set()
+    st.rerun()
 
 # 👉 Aktuelle Frage
 row = gefiltert.iloc[st.session_state.frage_index]
@@ -68,6 +88,16 @@ antwort = st.text_input(
     on_change=antwort_pruefen
 )
 
+# 🔁 Button für nächste Vokabel direkt unter dem Eingabefeld
+if st.button("➡️ Nächste Vokabel"):
+    st.session_state.abgefragt_kategorie[kategorie].add(st.session_state.frage_index)
+    st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
+    st.session_state.antwort_gegeben = False
+    st.session_state.antwort_richtig = None
+    st.session_state.zeige_englisch = False
+    st.session_state.pop("antwort", None)
+    st.rerun()
+
 # ✅ Direktes Feedback nach der Eingabe
 if st.session_state.antwort_gegeben:
     if st.session_state.antwort_richtig:
@@ -75,34 +105,25 @@ if st.session_state.antwort_gegeben:
     else:
         st.error(f"❌ Leider falsch – richtig wäre: **{loesung}**")
 
-# 📙 Deutsche Beispielsätze
+# 📙 Deutsche Beispielsätze mit individuellen Übersetzungs-Buttons
 st.markdown("### 🔴 Beispielsätze (Deutsch)")
+
 for i in range(1, 4):
-    satz = row.get(f"DE_{i}", "")
-    if pd.notna(satz) and str(satz).strip() != "":
-        st.info(f"- {satz}")
+    deutscher_satz = row.get(f"DE_{i}", "")
+    englischer_satz = row.get(f"EN_{i}", "")
 
-# 🔄 Button zum Anzeigen der englischen Sätze
-if st.button("📘 Englische Sätze anzeigen"):
-    st.session_state.zeige_englisch = True
+    if pd.notna(deutscher_satz) and str(deutscher_satz).strip() != "":
+        with st.container():
+            st.info(deutscher_satz)
 
-if st.session_state.zeige_englisch:
-    st.markdown("### 📘 Beispielsätze (Englisch)")
-    for i in range(1, 4):
-        satz = row.get(f"EN_{i}", "")
-        if pd.notna(satz) and str(satz).strip() != "":
-            st.success(f"- {satz}")
+            button_key = f"zeige_uebersetzung_{i}_{st.session_state.frage_index}"
+            if st.button(f"💬 Übersetzung zu Satz {i} anzeigen", key=button_key):
+                if pd.notna(englischer_satz) and str(englischer_satz).strip() != "":
+                    st.success(englischer_satz)
+                else:
+                    st.warning("⚠️ Keine Übersetzung vorhanden.")
 
-# 🔁 Button für nächste Vokabel direkt darunter
-if st.button("➡️ Nächste Vokabel"):
-    st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
-    st.session_state.antwort_gegeben = False
-    st.session_state.antwort_richtig = None
-    st.session_state.zeige_englisch = False
-    st.session_state.pop("antwort", None)  # Eingabefeld zurücksetzen
-    st.rerun()
-
-# 📊 Modernes Statistik-Diagramm zur aktuellen Vokabel
+# 📊 Statistik zur aktuellen Vokabel
 if st.session_state.antwort_gegeben:
     richtig = row["Richtig"] if not pd.isna(row["Richtig"]) else 0
     falsch = row["Falsch"] if not pd.isna(row["Falsch"]) else 0
@@ -131,3 +152,4 @@ if st.session_state.antwort_gegeben:
 
         ax.axis("equal")
         st.pyplot(fig)
+
