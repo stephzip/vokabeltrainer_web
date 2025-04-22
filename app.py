@@ -176,6 +176,9 @@ if st.button("🔁 Fortschritt zurücksetzen"):
     st.session_state.abgefragt_kategorie[kategorie] = set()
     st.rerun()
 
+
+if st.session_state.frage_index >= len(gefiltert):
+    st.session_state.frage_index = 0
 row = gefiltert.iloc[st.session_state.frage_index]
 vokabel = row["Deutsch"]
 loesung = str(row["Englisch"]).strip().lower()
