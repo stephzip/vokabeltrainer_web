@@ -46,7 +46,7 @@ with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
                 mp3_fp = BytesIO()
                 tts.write_to_fp(mp3_fp)
                 mp3_fp.seek(0)
-                st.audio(mp3_fp, format='audio/mp3')
+                st.audio(mp3_fp, format='audio/mp3', start_time=0)
 
 # 💾 Session-Variablen
 if "frage_index" not in st.session_state:
