@@ -3,6 +3,9 @@ import pandas as pd
 import random
 import matplotlib.pyplot as plt
 import time
+from gtts import gTTS
+import os
+import base64
 
 # 📄 Excel-Datei laden
 excel_path = "vokabeln.xlsx"
@@ -20,6 +23,25 @@ gefiltert = df[df["Kategorie"] == kategorie].reset_index(drop=True)
 if gefiltert.empty:
     st.warning("⚠️ Keine Vokabeln in dieser Kategorie gefunden.")
     st.stop()
+
+# 📄 Vokabelliste mit Anhören-Button
+with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
+    for idx, row_ in gefiltert[["Deutsch", "Englisch"]].dropna().reset_index(drop=True).iterrows():
+        col1, col2, col3 = st.columns([4, 4, 1])
+        with col1:
+            st.markdown(f"**🇩🇪 {row_['Deutsch']}**")
+        with col2:
+            st.markdown(f"**🇬🇧 {row_['Englisch']}**")
+        with col3:
+            if st.button("🔊", key=f"tts_{idx}"):
+                tts = gTTS(text=row_["Englisch"], lang='en')
+                filename = f"tts_output_{idx}.mp3"
+                tts.save(filename)
+                audio_file = open(filename, "rb")
+                audio_bytes = audio_file.read()
+                st.audio(audio_bytes, format='audio/mp3')
+                audio_file.close()
+                os.remove(filename)
 
 # 💾 Session-Variablen
 if "frage_index" not in st.session_state:
