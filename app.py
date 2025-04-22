@@ -3,9 +3,11 @@ import pandas as pd
 import random
 import matplotlib.pyplot as plt
 import time
-#from gtts import gTTS
-#import os
-#import base64
+from gtts import gTTS
+import os
+import base64
+from io import BytesIO
+
 
 # 📄 Excel-Datei laden
 excel_path = "vokabeln.xlsx"
@@ -25,10 +27,26 @@ if gefiltert.empty:
     st.stop()
 
 # 📄 Vokabelliste anzeigen (vor dem Lernen)
+# with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
+#     liste = gefiltert[["Deutsch", "Englisch"]].dropna()
+#     liste = liste.rename(columns={"Deutsch": "🇩🇪 Deutsch", "Englisch": "🇬🇧 Englisch"})
+#     st.dataframe(liste, use_container_width=True)
+
+# 📄 Vokabelliste mit Sprachausgabe (cloudfähig, ohne Dateispeicherung)
 with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
-    liste = gefiltert[["Deutsch", "Englisch"]].dropna()
-    liste = liste.rename(columns={"Deutsch": "🇩🇪 Deutsch", "Englisch": "🇬🇧 Englisch"})
-    st.dataframe(liste, use_container_width=True)
+    for idx, row_ in gefiltert[["Deutsch", "Englisch"]].dropna().reset_index(drop=True).iterrows():
+        col1, col2, col3 = st.columns([4, 4, 1])
+        with col1:
+            st.markdown(f"**🇩🇪 {row_['Deutsch']}**")
+        with col2:
+            st.markdown(f"**🇬🇧 {row_['Englisch']}**")
+        with col3:
+            if st.button("🔊", key=f"tts_{idx}"):
+                tts = gTTS(text=row_["Englisch"], lang='en')
+                mp3_fp = BytesIO()
+                tts.write_to_fp(mp3_fp)
+                mp3_fp.seek(0)
+                st.audio(mp3_fp, format='audio/mp3')
 
 # 💾 Session-Variablen
 if "frage_index" not in st.session_state:
