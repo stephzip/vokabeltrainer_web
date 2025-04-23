@@ -9,12 +9,14 @@ import os
 from io import BytesIO
 import streamlit as st
 
+
 # 📄 Excel-Datei laden
 excel_path = "vokabeln.xlsx"
 df = pd.read_excel(excel_path)
 
 st.title("📘 Vokabeltrainer")
 st.markdown("---")  # horizontale Linie
+
 
 
 # 📦 Testmodus-Setup
