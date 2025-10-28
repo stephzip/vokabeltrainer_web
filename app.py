@@ -211,6 +211,7 @@ if st.button("➡️ Nächste Vokabel"):
     st.session_state.antwort_gegeben = False
     st.session_state.antwort_richtig = None
     st.session_state.zeige_englisch = False
+    st.session_state.reset_antwort = True 
     st.session_state.pop("antwort", None)
     st.rerun()
 
