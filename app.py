@@ -1,11 +1,10 @@
-#python -m streamlit run app.py
+# python -m streamlit run app.py
 
 import pandas as pd
 import random
 import matplotlib.pyplot as plt
 import time
 from gtts import gTTS
-import os
 from io import BytesIO
 import streamlit as st
 
@@ -16,8 +15,6 @@ df = pd.read_excel(excel_path)
 
 st.title("📘 Vokabeltrainer")
 st.markdown("---")  # horizontale Linie
-
-
 
 # 📦 Testmodus-Setup
 if "test_aktiv" not in st.session_state:
@@ -40,7 +37,12 @@ if not st.session_state.test_aktiv:
     test_kats = st.multiselect("Wähle die Kategorien für den Test:", df["Kategorie"].dropna().unique())
 
     if st.button("🎯 Neuer Test starten", disabled=len(test_kats) == 0):
-        gefiltert_test = df[df["Kategorie"].isin(test_kats)].dropna(subset=["Deutsch", "Englisch"]).sample(n=min(25, len(df)), random_state=random.randint(0, 9999)).reset_index(drop=True)
+        gefiltert_test = (
+            df[df["Kategorie"].isin(test_kats)]
+            .dropna(subset=["Deutsch", "Englisch"])
+            .sample(n=min(25, len(df)), random_state=random.randint(0, 9999))
+            .reset_index(drop=True)
+        )
         st.session_state.test_aktiv = True
         st.session_state.test_kategorien = test_kats
         st.session_state.test_vokabeln = gefiltert_test
@@ -75,7 +77,7 @@ else:
 
         if st.button("Antwort prüfen", key=f"test_check_{idx}"):
             korrekt = user_input.strip().lower() == str(row["Englisch"]).strip().lower()
-            st.session_state.test_vokabeln.at[idx, 'User_Eingabe'] = user_input
+            st.session_state.test_vokabeln.at[idx, "User_Eingabe"] = user_input
             st.session_state.test_ergebnisse.append(korrekt)
             st.session_state.test_index += 1
             if st.session_state.test_index >= 25:
@@ -93,7 +95,7 @@ else:
             labels=["Richtig", "Falsch"],
             autopct="%1.1f%%",
             colors=["#2ECC71", "#E74C3C"],
-            startangle=90
+            startangle=90,
         )
         for autotext in autotexts:
             autotext.set_fontsize(10)
@@ -107,18 +109,24 @@ else:
             frage = st.session_state.test_vokabeln.iloc[i]
             symbol = "✅" if korrekt else "❌"
             farbe = "green" if korrekt else "red"
-            eingabe = frage.get('User_Eingabe', '–')
+            eingabe = frage.get("User_Eingabe", "–")
 
             if korrekt:
-                st.markdown(f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}</span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}</span>",
+                    unsafe_allow_html=True,
+                )
             else:
-                st.markdown(f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}<br><i>Deine Antwort:</i> <b>{eingabe}</b></span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}<br>"
+                    f"<i>Deine Antwort:</i> <b>{eingabe}</b></span>",
+                    unsafe_allow_html=True,
+                )
 
-
-
-
-st.markdown("---")  # horizontale Linie
+# --------------------------------------------------------------------
+st.markdown("---")
 st.header("🏋️‍♂️ Training")
+
 # 🎯 Kategorieauswahl
 kategorien = df["Kategorie"].dropna().unique()
 kategorie = st.selectbox("Kategorie auswählen:", kategorien)
@@ -139,12 +147,13 @@ with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
             st.markdown(f"**🇬🇧 {row_['Englisch']}**")
         with col3:
             if st.button("🔊", key=f"tts_{idx}"):
-                tts = gTTS(text=row_["Englisch"], lang='en')
+                tts = gTTS(text=row_["Englisch"], lang="en")
                 mp3_fp = BytesIO()
                 tts.write_to_fp(mp3_fp)
                 mp3_fp.seek(0)
-                st.audio(mp3_fp, format='audio/mp3', start_time=0)
+                st.audio(mp3_fp, format="audio/mp3", start_time=0)
 
+# 🧠 Session-States fürs Training
 if "frage_index" not in st.session_state:
     st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
 if "antwort_gegeben" not in st.session_state:
@@ -159,6 +168,8 @@ if "wechsel_timer" not in st.session_state:
     st.session_state.wechsel_timer = None
 if "abgefragt_kategorie" not in st.session_state:
     st.session_state.abgefragt_kategorie = {}
+if "reset_antwort" not in st.session_state:
+    st.session_state.reset_antwort = False
 
 if kategorie not in st.session_state.abgefragt_kategorie:
     st.session_state.abgefragt_kategorie[kategorie] = set()
@@ -168,8 +179,6 @@ abgefragt_anzahl = len(abgefragt_set)
 gesamt_anzahl = len(gefiltert)
 fortschritt = abgefragt_anzahl / gesamt_anzahl
 
-
-
 st.markdown("### 📈 Fortschritt")
 st.progress(fortschritt)
 st.text(f"{abgefragt_anzahl} von {gesamt_anzahl} Vokabeln in dieser Kategorie abgefragt")
@@ -178,17 +187,19 @@ if st.button("🔁 Fortschritt zurücksetzen"):
     st.session_state.abgefragt_kategorie[kategorie] = set()
     st.rerun()
 
-
+# 🗣 Aktuelle Vokabel laden
 if st.session_state.frage_index >= len(gefiltert):
     st.session_state.frage_index = 0
 row = gefiltert.iloc[st.session_state.frage_index]
 vokabel = row["Deutsch"]
 loesung = str(row["Englisch"]).strip().lower()
 
+
+# ✅ Antwort prüfen
 def antwort_pruefen():
     gegeben = st.session_state.get("antwort", "").strip().lower()
     st.session_state.antwort_gegeben = True
-    st.session_state.antwort_richtig = (gegeben == loesung)
+    st.session_state.antwort_richtig = gegeben == loesung
 
     idx_original = df[(df["Deutsch"] == vokabel) & (df["Kategorie"] == kategorie)].index
     if len(idx_original) > 0:
@@ -201,26 +212,37 @@ def antwort_pruefen():
 
     st.session_state.wechsel_timer = time.time()
 
-st.subheader(f"Übersetze: **{vokabel}**")
-antwort_default = st.session_state.get("antwort", "")
-antwort = st.text_input("Englische Übersetzung eingeben:", value=antwort_default, key="antwort", on_change=antwort_pruefen)
 
+# 🔁 Eingabefeld-Reset (Variante 1)
+if st.session_state.reset_antwort:
+    st.session_state.antwort = ""
+    st.session_state.reset_antwort = False
+
+st.subheader(f"Übersetze: **{vokabel}**")
+antwort = st.text_input(
+    "Englische Übersetzung eingeben:",
+    key="antwort",
+    on_change=antwort_pruefen,
+)
+
+# ➡️ Nächste Vokabel
 if st.button("➡️ Nächste Vokabel"):
     st.session_state.abgefragt_kategorie[kategorie].add(st.session_state.frage_index)
     st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
     st.session_state.antwort_gegeben = False
     st.session_state.antwort_richtig = None
     st.session_state.zeige_englisch = False
-    st.session_state.reset_antwort = True 
-    st.session_state.pop("antwort", None)
+    st.session_state.reset_antwort = True  # <--- hier setzen wir das Reset-Flag
     st.rerun()
 
+# 🟩 Ergebnis-Feedback
 if st.session_state.antwort_gegeben:
     if st.session_state.antwort_richtig:
         st.success("✅ Deine Antwort ist korrekt!")
     else:
         st.error(f"❌ Leider falsch – richtig wäre: **{loesung}**")
 
+# 🔴 Beispielsätze (Deutsch)
 st.markdown("### 🔴 Beispielsätze (Deutsch)")
 
 for i in range(1, 4):
@@ -238,6 +260,7 @@ for i in range(1, 4):
                 else:
                     st.warning("⚠️ Keine Übersetzung vorhanden.")
 
+# 📊 Statistik
 if st.session_state.antwort_gegeben:
     richtig = row["Richtig"] if not pd.isna(row["Richtig"]) else 0
     falsch = row["Falsch"] if not pd.isna(row["Falsch"]) else 0
@@ -255,7 +278,7 @@ if st.session_state.antwort_gegeben:
             autopct="%1.1f%%",
             colors=["#2ECC71", "#E74C3C"],
             textprops={"fontsize": 10, "color": "black"},
-            startangle=90
+            startangle=90,
         )
         for autotext in autotexts:
             autotext.set_fontsize(10)
