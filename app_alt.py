@@ -4,150 +4,14 @@ import pandas as pd
 import random
 import matplotlib.pyplot as plt
 import time
-import json
-import os
 from gtts import gTTS
 from io import BytesIO
 import streamlit as st
-from openai import OpenAI
 
 
 # 📄 Excel-Datei laden
 excel_path = "vokabeln.xlsx"
 df = pd.read_excel(excel_path)
-
-
-# --------------------------------------------------------------------
-# 🤖 KI-Funktion für dynamische Beispielsätze
-# Voraussetzung:
-# 1) pip install openai
-# 2) API-Key setzen:
-#    lokal: .streamlit/secrets.toml mit OPENAI_API_KEY = "..."
-#    oder als Umgebungsvariable OPENAI_API_KEY
-#
-# Optional in .streamlit/secrets.toml:
-# OPENAI_MODEL = "gpt-4.1-mini"
-# --------------------------------------------------------------------
-
-def get_openai_api_key():
-    """Liest den API-Key aus Streamlit Secrets oder aus der Umgebungsvariable."""
-    try:
-        if "OPENAI_API_KEY" in st.secrets:
-            return st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        pass
-    return os.getenv("OPENAI_API_KEY")
-
-
-def get_openai_model():
-    """Modell zentral einstellbar machen."""
-    try:
-        if "OPENAI_MODEL" in st.secrets:
-            return st.secrets["OPENAI_MODEL"]
-    except Exception:
-        pass
-    return "gpt-4.1-mini"
-
-
-def extract_json_array(text):
-    """
-    Robustere JSON-Extraktion, falls das Modell versehentlich Text um die JSON-Liste schreibt.
-    Erwartet am Ende eine Liste von Dicts.
-    """
-    text = text.strip()
-    start = text.find("[")
-    end = text.rfind("]") + 1
-
-    if start == -1 or end == 0:
-        raise ValueError("Keine JSON-Liste in der KI-Antwort gefunden.")
-
-    return json.loads(text[start:end])
-
-
-@st.cache_data(show_spinner=False)
-def generate_ai_examples(word_de, word_en, level, category, variant=0, n=3):
-    """
-    Erzeugt dynamische Übungssätze für eine Vokabel.
-    Cache verhindert, dass bei jedem Streamlit-Rerun erneut API-Kosten entstehen.
-    variant dient als Cache-Buster, wenn der Nutzer bewusst neue Sätze erzeugen will.
-    """
-    api_key = get_openai_api_key()
-
-    if not api_key:
-        return {
-            "ok": False,
-            "error": "OPENAI_API_KEY fehlt. Bitte in .streamlit/secrets.toml oder als Umgebungsvariable setzen.",
-            "examples": []
-        }
-
-    client = OpenAI(api_key=api_key)
-
-    prompt = f"""
-Du bist ein Englischlehrer für einen deutschen Lerner.
-
-Erstelle {n} neue Übungssätze für einen Vokabeltrainer.
-
-Vokabel Deutsch: {word_de}
-Vokabel Englisch: {word_en}
-Kategorie: {category}
-Schwierigkeit: {level}
-
-Ziel:
-- Der deutsche Satz ist die Aufgabe.
-- Die englische Übersetzung ist die Musterlösung.
-- Die englische Übersetzung muss die Vokabel "{word_en}" natürlich und korrekt verwenden.
-
-Regeln:
-- Keine Wiederholungen.
-- Keine zu langen Sätze bei "leicht".
-- Bei "komplex" darf der Satz einen Nebensatz enthalten.
-- Bei Business-, Energie- oder Gas-Themen gerne fachnah formulieren.
-- Antworte ausschließlich als JSON-Liste.
-- Keine Markdown-Formatierung.
-- Keine Erklärungen außerhalb der JSON-Liste.
-
-JSON-Format:
-[
-  {{
-    "deutscher_satz": "...",
-    "englischer_satz": "..."
-  }}
-]
-"""
-
-    try:
-        response = client.responses.create(
-            model=get_openai_model(),
-            input=prompt,
-        )
-
-        text = response.output_text
-        examples = extract_json_array(text)
-
-        # einfache Validierung
-        cleaned = []
-        for ex in examples:
-            de = str(ex.get("deutscher_satz", "")).strip()
-            en = str(ex.get("englischer_satz", "")).strip()
-            if de and en:
-                cleaned.append({
-                    "deutscher_satz": de,
-                    "englischer_satz": en
-                })
-
-        return {
-            "ok": True,
-            "error": "",
-            "examples": cleaned[:n]
-        }
-
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": str(e),
-            "examples": []
-        }
-
 
 st.title("📘 Vokabeltrainer")
 st.markdown("---")  # horizontale Linie
@@ -378,65 +242,23 @@ if st.session_state.antwort_gegeben:
     else:
         st.error(f"❌ Leider falsch – richtig wäre: **{loesung}**")
 
-# 🤖 KI-Beispielsätze
-st.markdown("### 🤖 KI-Beispielsätze")
+# 🔴 Beispielsätze (Deutsch)
+st.markdown("### 🔴 Beispielsätze (Deutsch)")
 
-ki_level = st.selectbox(
-    "Schwierigkeit der Beispielsätze:",
-    ["leicht", "mittel", "komplex"],
-    index=1,
-    key=f"ki_level_{kategorie}"
-)
+for i in range(1, 4):
+    deutscher_satz = row.get(f"DE_{i}", "")
+    englischer_satz = row.get(f"EN_{i}", "")
 
-# Cache-Buster pro Vokabel, damit der Button wirklich neue Sätze erzeugen kann.
-refresh_key = f"ki_refresh_{kategorie}_{st.session_state.frage_index}"
-if refresh_key not in st.session_state:
-    st.session_state[refresh_key] = 0
+    if pd.notna(deutscher_satz) and str(deutscher_satz).strip() != "":
+        with st.container():
+            st.info(deutscher_satz)
 
-col_ki_1, col_ki_2 = st.columns([1, 1])
-with col_ki_1:
-    auto_ki = st.checkbox(
-        "KI-Sätze automatisch für diese Vokabel erzeugen",
-        value=True,
-        key="auto_ki_examples"
-    )
-
-with col_ki_2:
-    if st.button("🔄 Neue KI-Beispielsätze erzeugen"):
-        st.session_state[refresh_key] += 1
-        st.rerun()
-
-if auto_ki:
-    englisch_original = str(row["Englisch"]).strip()
-
-    with st.spinner("KI erstellt neue Beispielsätze ..."):
-        result = generate_ai_examples(
-            word_de=vokabel,
-            word_en=englisch_original,
-            level=ki_level,
-            category=kategorie,
-            variant=st.session_state[refresh_key],
-            n=3
-        )
-
-    if not result["ok"]:
-        st.warning(f"⚠️ KI-Beispielsätze konnten nicht erzeugt werden: {result['error']}")
-        st.info("Tipp: Prüfe, ob dein OPENAI_API_KEY korrekt gesetzt ist und ob `openai` installiert ist.")
-    elif len(result["examples"]) == 0:
-        st.warning("⚠️ Die KI hat keine verwertbaren Beispielsätze geliefert.")
-    else:
-        for i, example in enumerate(result["examples"], start=1):
-            deutscher_satz = example["deutscher_satz"]
-            englischer_satz = example["englischer_satz"]
-
-            with st.container():
-                st.info(deutscher_satz)
-
-                button_key = f"zeige_ki_uebersetzung_{i}_{st.session_state.frage_index}_{st.session_state[refresh_key]}"
-                if st.button(f"💬 KI-Übersetzung zu Satz {i} anzeigen", key=button_key):
+            button_key = f"zeige_uebersetzung_{i}_{st.session_state.frage_index}"
+            if st.button(f"💬 Übersetzung zu Satz {i} anzeigen", key=button_key):
+                if pd.notna(englischer_satz) and str(englischer_satz).strip() != "":
                     st.success(englischer_satz)
-else:
-    st.info("KI-Beispielsätze sind deaktiviert.")
+                else:
+                    st.warning("⚠️ Keine Übersetzung vorhanden.")
 
 # 📊 Statistik
 if st.session_state.antwort_gegeben:
