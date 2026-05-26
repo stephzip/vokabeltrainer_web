@@ -379,116 +379,6 @@ JSON-Format:
     except Exception as e:
         return {"ok": False, "error": str(e), "data": {}}
 
-
-
-def generate_ai_vocabulary(topic: str, count: int, category: str, level: str = "mittel", include_examples: bool = True, variant: int = 0):
-    """Erzeugt neue Vokabelvorschläge zu einem frei vorgegebenen Themenbereich."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY fehlt.", "data": []}
-
-    client = OpenAI(api_key=api_key)
-    examples_instruction = """
-- Erstelle je Vokabel 2 deutsche Beispielsätze und die passenden englischen Musterlösungen.
-- Die englischen Beispielsätze müssen die englische Vokabel natürlich verwenden.
-""" if include_examples else """
-- Lasse die Beispielsatz-Felder leer.
-"""
-
-    prompt = f"""
-Du bist ein Englischlehrer für einen deutschen Lerner mit Fokus auf Business English, Energy Markets und Gas Storage.
-Erstelle {count} neue, nützliche Vokabeln für einen Vokabeltrainer.
-
-Themenbereich: {topic}
-Ziel-Kategorie: {category}
-Schwierigkeit: {level}
-Variante: {variant}
-
-Regeln:
-- Wähle praxisnahe Begriffe, keine unnötig exotischen Wörter.
-- Deutsch und Englisch müssen fachlich korrekt sein.
-- Keine Duplikate innerhalb der Liste.
-- Synonyme nur aufnehmen, wenn sie im Kontext als Antwort vertretbar sind.
-- Alternative Antworten mit sinnvollen Varianten ergänzen, z. B. ohne "to" bei Verben.
-{examples_instruction}
-- Antworte ausschließlich als JSON-Liste ohne Markdown.
-
-JSON-Format:
-[
-  {{
-    "Deutsch": "...",
-    "Englisch": "...",
-    "Kategorie": "...",
-    "Schwierigkeit": "leicht|mittel|komplex",
-    "Alternative_Antworten": "Antwort 1; Antwort 2",
-    "Synonyme_EN": "synonym 1; synonym 2",
-    "Synonyme_DE": "Synonym 1; Synonym 2",
-    "Antonyme_EN": "antonym 1; antonym 2",
-    "Notizen": "kurze Lernnotiz auf Deutsch",
-    "KI_DE_1": "...",
-    "KI_EN_1": "...",
-    "KI_DE_2": "...",
-    "KI_EN_2": "...",
-    "KI_DE_3": "",
-    "KI_EN_3": ""
-  }}
-]
-"""
-    try:
-        response = client.responses.create(model=get_openai_model(), input=prompt)
-        data = extract_json(response.output_text)
-        if not isinstance(data, list):
-            raise ValueError("Die KI-Antwort war keine JSON-Liste.")
-
-        cleaned = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            de = str(item.get("Deutsch", "")).strip()
-            en = str(item.get("Englisch", "")).strip()
-            if not de or not en:
-                continue
-            lvl = str(item.get("Schwierigkeit", level)).strip().lower()
-            if lvl not in ["leicht", "mittel", "komplex"]:
-                lvl = level
-            cleaned.append({
-                "Deutsch": de,
-                "Englisch": en,
-                "Kategorie": str(item.get("Kategorie", category)).strip() or category,
-                "Schwierigkeit": lvl,
-                "Alternative_Antworten": str(item.get("Alternative_Antworten", "")).strip(),
-                "Synonyme_EN": str(item.get("Synonyme_EN", "")).strip(),
-                "Synonyme_DE": str(item.get("Synonyme_DE", "")).strip(),
-                "Antonyme_EN": str(item.get("Antonyme_EN", "")).strip(),
-                "Synonym_Notiz": str(item.get("Synonym_Notiz", "")).strip(),
-                "Notizen": str(item.get("Notizen", "")).strip(),
-                "KI_DE_1": str(item.get("KI_DE_1", "")).strip(),
-                "KI_EN_1": str(item.get("KI_EN_1", "")).strip(),
-                "KI_DE_2": str(item.get("KI_DE_2", "")).strip(),
-                "KI_EN_2": str(item.get("KI_EN_2", "")).strip(),
-                "KI_DE_3": str(item.get("KI_DE_3", "")).strip(),
-                "KI_EN_3": str(item.get("KI_EN_3", "")).strip(),
-            })
-        return {"ok": True, "error": "", "data": cleaned[:count]}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "data": []}
-
-
-def is_duplicate_word(df: pd.DataFrame, deutsch: str, englisch: str) -> bool:
-    """Prüft robuste Dubletten anhand Deutsch oder Englisch."""
-    de_norm = normalize_answer(deutsch)
-    en_norm = normalize_answer(englisch)
-    if df.empty:
-        return False
-    existing_de = df["Deutsch"].astype(str).map(normalize_answer) if "Deutsch" in df.columns else pd.Series([], dtype=str)
-    existing_en = df["Englisch"].astype(str).map(normalize_answer) if "Englisch" in df.columns else pd.Series([], dtype=str)
-    return bool((existing_de.eq(de_norm) | existing_en.eq(en_norm)).any())
-
-
-def build_new_word_id(df: pd.DataFrame, offset: int = 1) -> str:
-    """Erzeugt eine robuste neue ID."""
-    return f"W{len(df) + offset:05d}_{int(time.time())}"
-
 def create_cloze_sentence(sentence: str, word_en: str) -> str:
     """Einfacher Lückentext: ersetzt die Vokabel oder einzelne Bestandteile."""
     sentence = str(sentence)
@@ -532,8 +422,6 @@ st.session_state.setdefault("antwort_hinweis", "")
 st.session_state.setdefault("reset_antwort", False)
 st.session_state.setdefault("last_ai_examples", [])
 st.session_state.setdefault("last_ai_synonyms", None)
-st.session_state.setdefault("last_generated_vocabulary", [])
-st.session_state.setdefault("vocab_generator_refresh", 0)
 st.session_state.setdefault("ai_refresh", 0)
 st.session_state.setdefault("synonym_refresh", 0)
 st.session_state.setdefault("test_aktiv", False)
@@ -541,12 +429,11 @@ st.session_state.setdefault("test_vokabeln", None)
 st.session_state.setdefault("test_index", 0)
 st.session_state.setdefault("test_ergebnisse", [])
 
-tab_training, tab_test, tab_dashboard, tab_admin, tab_generator, tab_settings = st.tabs([
+tab_training, tab_test, tab_dashboard, tab_admin, tab_settings = st.tabs([
     "🏋️ Training",
     "🎓 Test",
     "📊 Dashboard",
     "🛠️ Admin",
-    "➕ KI-Vokabelgenerator",
     "⚙️ Einstellungen",
 ])
 
@@ -1020,135 +907,6 @@ with tab_admin:
             file_name="vokabeln.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
-
-# ============================================================
-# KI-Vokabelgenerator
-# ============================================================
-with tab_generator:
-    st.header("➕ KI-Vokabelgenerator")
-    st.caption(
-        "Erzeuge neue Vokabelpakete zu einem Themenbereich. "
-        "Die Vorschläge werden zuerst angezeigt und erst nach deiner Bestätigung in die Excel-Datei gespeichert."
-    )
-
-    with st.form("vocab_generator_form"):
-        gen_topic = st.text_area(
-            "Themenbereich / Prompt",
-            value="Gas storage risk management",
-            help="Beispiele: Gas storage hedging, Business meetings, Contract negotiations, Energy trading, General Business English",
-        )
-        gen_col1, gen_col2, gen_col3 = st.columns([1, 1, 1])
-        with gen_col1:
-            gen_count = st.slider("Anzahl neuer Vokabeln", min_value=3, max_value=30, value=10, step=1)
-        with gen_col2:
-            existing_categories = sorted([str(x) for x in df["Kategorie"].dropna().unique() if str(x).strip()]) if not df.empty else []
-            default_cat = existing_categories[0] if existing_categories else "Allgemein"
-            gen_category = st.text_input("Kategorie", value=default_cat)
-        with gen_col3:
-            gen_level = st.selectbox("Schwierigkeit", ["leicht", "mittel", "komplex"], index=1)
-        gen_include_examples = st.checkbox("Direkt Beispielsätze miterzeugen", value=True)
-        submitted_generate_vocab = st.form_submit_button("🤖 Vokabeln per KI erzeugen")
-
-    if submitted_generate_vocab:
-        if not str(gen_topic).strip():
-            st.warning("Bitte gib zuerst einen Themenbereich ein.")
-        else:
-            with st.spinner("KI erzeugt neue Vokabelvorschläge ..."):
-                result = generate_ai_vocabulary(
-                    topic=gen_topic.strip(),
-                    count=int(gen_count),
-                    category=gen_category.strip() or "Allgemein",
-                    level=gen_level,
-                    include_examples=gen_include_examples,
-                    variant=st.session_state.vocab_generator_refresh,
-                )
-            st.session_state.vocab_generator_refresh += 1
-            if result["ok"]:
-                proposals = []
-                for item in result["data"]:
-                    duplicate = is_duplicate_word(df, item.get("Deutsch", ""), item.get("Englisch", ""))
-                    proposals.append({"Auswählen": not duplicate, "Duplikat?": "ja" if duplicate else "nein", **item})
-                st.session_state.last_generated_vocabulary = proposals
-                if proposals:
-                    st.success(f"{len(proposals)} Vokabelvorschläge wurden erzeugt.")
-                else:
-                    st.warning("Die KI hat keine verwertbaren Vokabeln geliefert.")
-            else:
-                st.warning(f"Vokabeln konnten nicht erzeugt werden: {result['error']}")
-
-    proposals = st.session_state.last_generated_vocabulary
-    if proposals:
-        st.markdown("### Vorschläge prüfen")
-        st.caption("Entferne den Haken bei Vokabeln, die du nicht speichern möchtest. Bereits vorhandene Duplikate werden standardmäßig abgewählt.")
-        proposal_df = pd.DataFrame(proposals)
-        edited_proposals = st.data_editor(
-            proposal_df,
-            use_container_width=True,
-            num_rows="dynamic",
-            key="generated_vocab_editor",
-            column_config={
-                "Auswählen": st.column_config.CheckboxColumn("Auswählen"),
-                "Duplikat?": st.column_config.TextColumn("Duplikat?", disabled=True),
-            },
-        )
-
-        save_col1, save_col2, save_col3 = st.columns([1, 1, 2])
-        with save_col1:
-            if st.button("💾 Ausgewählte Vokabeln speichern", use_container_width=True):
-                selected = edited_proposals[edited_proposals["Auswählen"] == True].copy()
-                if selected.empty:
-                    st.warning("Keine Vokabel ausgewählt.")
-                else:
-                    rows_to_add = []
-                    skipped_duplicates = []
-                    for _, item in selected.iterrows():
-                        de = str(item.get("Deutsch", "")).strip()
-                        en = str(item.get("Englisch", "")).strip()
-                        if not de or not en:
-                            continue
-                        if is_duplicate_word(df, de, en):
-                            skipped_duplicates.append(f"{de} / {en}")
-                            continue
-
-                        new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}
-                        new_row.update({
-                            "ID": build_new_word_id(df, len(rows_to_add) + 1),
-                            "Deutsch": de,
-                            "Englisch": en,
-                            "Kategorie": str(item.get("Kategorie", "Allgemein")).strip() or "Allgemein",
-                            "Schwierigkeit": str(item.get("Schwierigkeit", DEFAULT_AI_LEVEL)).strip() or DEFAULT_AI_LEVEL,
-                            "Alternative_Antworten": str(item.get("Alternative_Antworten", "")).strip(),
-                            "Synonyme_EN": str(item.get("Synonyme_EN", "")).strip(),
-                            "Synonyme_DE": str(item.get("Synonyme_DE", "")).strip(),
-                            "Antonyme_EN": str(item.get("Antonyme_EN", "")).strip(),
-                            "Synonym_Notiz": str(item.get("Synonym_Notiz", "")).strip(),
-                            "Notizen": str(item.get("Notizen", "")).strip(),
-                            "KI_DE_1": str(item.get("KI_DE_1", "")).strip(),
-                            "KI_EN_1": str(item.get("KI_EN_1", "")).strip(),
-                            "KI_DE_2": str(item.get("KI_DE_2", "")).strip(),
-                            "KI_EN_2": str(item.get("KI_EN_2", "")).strip(),
-                            "KI_DE_3": str(item.get("KI_DE_3", "")).strip(),
-                            "KI_EN_3": str(item.get("KI_EN_3", "")).strip(),
-                        })
-                        rows_to_add.append(new_row)
-
-                    if rows_to_add:
-                        df_new = pd.concat([df, pd.DataFrame(rows_to_add)], ignore_index=True)
-                        save_data(df_new)
-                        st.success(f"{len(rows_to_add)} neue Vokabeln wurden in der Excel-Datei gespeichert.")
-                        if skipped_duplicates:
-                            st.info("Übersprungene Duplikate: " + "; ".join(skipped_duplicates[:10]))
-                        st.session_state.last_generated_vocabulary = []
-                        st.rerun()
-                    else:
-                        st.warning("Es wurden keine neuen Vokabeln gespeichert. Möglicherweise waren alle ausgewählten Einträge Duplikate.")
-        with save_col2:
-            if st.button("🗑️ Vorschläge verwerfen", use_container_width=True):
-                st.session_state.last_generated_vocabulary = []
-                st.rerun()
-        with save_col3:
-            st.info("Gespeichert wird lokal in `vokabeln.xlsx`. In Streamlit Cloud ist Excel-Speicherung nicht dauerhaft GitHub-synchron.")
 
 # ============================================================
 # Einstellungen
