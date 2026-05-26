@@ -540,7 +540,6 @@ st.session_state.setdefault("test_aktiv", False)
 st.session_state.setdefault("test_vokabeln", None)
 st.session_state.setdefault("test_index", 0)
 st.session_state.setdefault("test_ergebnisse", [])
-st.session_state.setdefault("test_direction", "Deutsch → Englisch")
 
 tab_training, tab_test, tab_dashboard, tab_admin, tab_generator, tab_settings = st.tabs([
     "🏋️ Training",
@@ -564,7 +563,7 @@ with tab_training:
     selected_category = st.selectbox("Kategorie auswählen:", categories if categories else ["Allgemein"])
     mode = st.radio(
         "Lernmodus:",
-        ["Deutsch → Englisch", "Englisch → Deutsch", "Lückentext"],
+        ["Deutsch → Englisch", "Lückentext"],
         horizontal=True,
     )
 
@@ -631,15 +630,7 @@ with tab_training:
     st.markdown("---")
 
     if mode == "Deutsch → Englisch":
-        st.subheader(f"Übersetze ins Englische: **{vokabel_de}**")
-        expected_answer = vokabel_en
-        accepted_for_mode = accepted_answers
-        input_label = "Englische Antwort eingeben:"
-    elif mode == "Englisch → Deutsch":
-        st.subheader(f"Übersetze ins Deutsche: **{vokabel_en}**")
-        expected_answer = vokabel_de
-        accepted_for_mode = synonyms_de
-        input_label = "Deutsche Antwort eingeben:"
+        st.subheader(f"Übersetze: **{vokabel_de}**")
     else:
         # Für Lückentext bevorzugt gespeicherte oder frisch erzeugte KI-Sätze verwenden
         base_sentence = ""
@@ -651,9 +642,6 @@ with tab_training:
             base_sentence = f"I need to use the word {vokabel_en} correctly."
         st.subheader("Fülle die Lücke:")
         st.info(create_cloze_sentence(base_sentence, vokabel_en))
-        expected_answer = vokabel_en
-        accepted_for_mode = accepted_answers
-        input_label = "Englische Antwort eingeben:"
 
     if st.session_state.reset_antwort:
         st.session_state.antwort = ""
@@ -661,7 +649,7 @@ with tab_training:
 
     def check_training_answer():
         user_input = st.session_state.get("antwort", "")
-        correct, reason = is_answer_correct(user_input, expected_answer, accepted_for_mode)
+        correct, reason = is_answer_correct(user_input, vokabel_en, accepted_answers)
         st.session_state.antwort_gegeben = True
         st.session_state.antwort_richtig = correct
         st.session_state.antwort_hinweis = reason
@@ -675,7 +663,7 @@ with tab_training:
             df.at[idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             save_data(df)
 
-    st.text_input(input_label, key="antwort", on_change=check_training_answer)
+    st.text_input("Englische Antwort eingeben:", key="antwort", on_change=check_training_answer)
 
     c_next1, c_next2, c_next3 = st.columns([1, 1, 2])
     with c_next1:
@@ -691,21 +679,18 @@ with tab_training:
         if st.session_state.antwort_richtig:
             st.success(f"✅ Deine Antwort ist korrekt! ({st.session_state.antwort_hinweis})")
         else:
-            st.error(f"❌ Leider falsch – richtig wäre: **{expected_answer}**")
-            if accepted_for_mode:
-                st.caption(f"Auch akzeptiert: {accepted_for_mode}")
+            st.error(f"❌ Leider falsch – richtig wäre: **{vokabel_en}**")
+            if accepted_answers:
+                st.caption(f"Auch akzeptiert: {accepted_answers}")
 
-            if mode in ["Deutsch → Englisch", "Lückentext"]:
-                with st.expander("🤖 KI-Feedback zu meiner Antwort"):
-                    if st.button("Feedback erzeugen", key=f"feedback_{st.session_state.current_word_id}"):
-                        with st.spinner("KI analysiert deine Antwort ..."):
-                            fb = ai_feedback(vokabel_de, vokabel_en, st.session_state.get("antwort", ""), selected_category)
-                        if fb["ok"]:
-                            st.markdown(fb["feedback"])
-                        else:
-                            st.warning(f"Feedback konnte nicht erzeugt werden: {fb['error']}")
-            else:
-                st.info("Für Deutsch-Antworten wird aktuell keine KI-Fehleranalyse erzeugt. Die Synonyme_DE werden aber als erlaubte Antworten berücksichtigt.")
+            with st.expander("🤖 KI-Feedback zu meiner Antwort"):
+                if st.button("Feedback erzeugen", key=f"feedback_{st.session_state.current_word_id}"):
+                    with st.spinner("KI analysiert deine Antwort ..."):
+                        fb = ai_feedback(vokabel_de, vokabel_en, st.session_state.get("antwort", ""), selected_category)
+                    if fb["ok"]:
+                        st.markdown(fb["feedback"])
+                    else:
+                        st.warning(f"Feedback konnte nicht erzeugt werden: {fb['error']}")
 
     # Synonyme
     st.markdown("---")
@@ -869,12 +854,6 @@ with tab_test:
 
     if not st.session_state.test_aktiv:
         test_kats = st.multiselect("Kategorien für den Test:", categories, default=categories[:1] if categories else [])
-        test_direction = st.radio(
-            "Abfragerichtung:",
-            ["Deutsch → Englisch", "Englisch → Deutsch"],
-            horizontal=True,
-            key="test_direction_radio",
-        )
         test_length = st.slider("Anzahl Fragen:", 5, 50, 25, step=5)
         only_wrong = st.checkbox("Nur schwierige/falsche Wörter bevorzugen", value=True)
 
@@ -889,7 +868,6 @@ with tab_test:
                 if len(pool) > test_length:
                     pool = pool.sample(n=test_length, random_state=random.randint(0, 99999)) if not only_wrong else pool.head(test_length)
                 st.session_state.test_aktiv = True
-                st.session_state.test_direction = test_direction
                 st.session_state.test_vokabeln = pool.reset_index(drop=True)
                 st.session_state.test_index = 0
                 st.session_state.test_ergebnisse = []
@@ -913,31 +891,17 @@ with tab_test:
 
         if idx < len(test_df):
             row_t = test_df.iloc[idx]
-            current_test_direction = st.session_state.get("test_direction", "Deutsch → Englisch")
-            if current_test_direction == "Englisch → Deutsch":
-                question_text = str(row_t["Englisch"])
-                expected_test_answer = str(row_t["Deutsch"])
-                test_accepted = str(row_t.get("Synonyme_DE", "") or "")
-                input_label_test = "Deutsche Übersetzung:"
-            else:
-                question_text = str(row_t["Deutsch"])
-                expected_test_answer = str(row_t["Englisch"])
+            st.subheader(f"Frage {idx + 1}/{len(test_df)} – Übersetze: **{row_t['Deutsch']}**")
+            user_input = st.text_input("Englische Übersetzung:", key=f"test_input_{idx}")
+            if st.button("Antwort prüfen", key=f"test_check_{idx}"):
                 test_accepted = "; ".join([
                     str(row_t.get("Alternative_Antworten", "") or ""),
                     str(row_t.get("Synonyme_EN", "") or ""),
                 ])
-                input_label_test = "Englische Übersetzung:"
-
-            st.subheader(f"Frage {idx + 1}/{len(test_df)} – Übersetze: **{question_text}**")
-            st.caption(f"Richtung: {current_test_direction}")
-            user_input = st.text_input(input_label_test, key=f"test_input_{idx}")
-            if st.button("Antwort prüfen", key=f"test_check_{idx}"):
-                correct, reason = is_answer_correct(user_input, expected_test_answer, test_accepted)
+                correct, reason = is_answer_correct(user_input, row_t["Englisch"], test_accepted)
                 st.session_state.test_ergebnisse.append({
                     "Deutsch": row_t["Deutsch"],
                     "Englisch": row_t["Englisch"],
-                    "Richtung": current_test_direction,
-                    "Erwartete_Antwort": expected_test_answer,
                     "Antwort": user_input,
                     "Korrekt": correct,
                     "Hinweis": reason,
