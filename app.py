@@ -1,36 +1,192 @@
 # python -m streamlit run app.py
 
-import pandas as pd
-import random
-import matplotlib.pyplot as plt
-import time
 import json
 import os
-from gtts import gTTS
+import random
+import re
+import time
+from datetime import datetime
+from difflib import SequenceMatcher
 from io import BytesIO
+
+import matplotlib.pyplot as plt
+import pandas as pd
 import streamlit as st
+from gtts import gTTS
 from openai import OpenAI
 
+# ============================================================
+# Konfiguration
+# ============================================================
+EXCEL_PATH = "vokabeln.xlsx"
+DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_AI_LEVEL = "mittel"
 
-# 📄 Excel-Datei laden
-excel_path = "vokabeln.xlsx"
-df = pd.read_excel(excel_path)
+BASE_COLUMNS = {
+    "ID": "",
+    "Deutsch": "",
+    "Englisch": "",
+    "Kategorie": "Allgemein",
+    "Schwierigkeit": DEFAULT_AI_LEVEL,
+    "Richtig": 0,
+    "Falsch": 0,
+    "Zuletzt_geuebt": "",
+    "Alternative_Antworten": "",
+    "Notizen": "",
+}
+
+KI_COLUMNS = {
+    "KI_DE_1": "",
+    "KI_EN_1": "",
+    "KI_DE_2": "",
+    "KI_EN_2": "",
+    "KI_DE_3": "",
+    "KI_EN_3": "",
+}
+
+# ============================================================
+# Hilfsfunktionen: Datei / Daten
+# ============================================================
+
+def ensure_excel_exists() -> None:
+    if not os.path.exists(EXCEL_PATH):
+        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()))
+        df.to_excel(EXCEL_PATH, index=False)
 
 
-# --------------------------------------------------------------------
-# 🤖 KI-Funktion für dynamische Beispielsätze
-# Voraussetzung:
-# 1) pip install openai
-# 2) API-Key setzen:
-#    lokal: .streamlit/secrets.toml mit OPENAI_API_KEY = "..."
-#    oder als Umgebungsvariable OPENAI_API_KEY
-#
-# Optional in .streamlit/secrets.toml:
-# OPENAI_MODEL = "gpt-4.1-mini"
-# --------------------------------------------------------------------
+def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Stellt sicher, dass alle benötigten Spalten existieren."""
+    for col, default in {**BASE_COLUMNS, **KI_COLUMNS}.items():
+        if col not in df.columns:
+            df[col] = default
 
-def get_openai_api_key():
-    """Liest den API-Key aus Streamlit Secrets oder aus der Umgebungsvariable."""
+    # IDs ergänzen, falls leer
+    if "ID" in df.columns:
+        for idx in df.index:
+            if pd.isna(df.at[idx, "ID"]) or str(df.at[idx, "ID"]).strip() == "":
+                df.at[idx, "ID"] = f"W{idx + 1:05d}"
+
+    # numerische Spalten robust machen
+    for col in ["Richtig", "Falsch"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+    # Textspalten robust machen
+    text_cols = [c for c in df.columns if c not in ["Richtig", "Falsch"]]
+    for col in text_cols:
+        df[col] = df[col].fillna("")
+
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_data_cached(file_mtime: float) -> pd.DataFrame:
+    ensure_excel_exists()
+    df = pd.read_excel(EXCEL_PATH)
+    return ensure_columns(df)
+
+
+def load_data() -> pd.DataFrame:
+    ensure_excel_exists()
+    mtime = os.path.getmtime(EXCEL_PATH)
+    return load_data_cached(mtime).copy()
+
+
+def save_data(df: pd.DataFrame) -> None:
+    df = ensure_columns(df.copy())
+    df.to_excel(EXCEL_PATH, index=False)
+    st.cache_data.clear()
+
+
+def find_row_index(df: pd.DataFrame, word_id: str) -> int | None:
+    matches = df.index[df["ID"].astype(str) == str(word_id)].tolist()
+    return matches[0] if matches else None
+
+# ============================================================
+# Hilfsfunktionen: Antwortprüfung
+# ============================================================
+
+def normalize_answer(value: str) -> str:
+    value = str(value or "").strip().lower()
+    value = value.replace("’", "'")
+    value = re.sub(r"[.,;:!?()\[\]{}]", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def answer_variants(main_answer: str, alternatives: str = "") -> set[str]:
+    variants = set()
+    for item in [main_answer] + re.split(r"[;|,]", str(alternatives or "")):
+        norm = normalize_answer(item)
+        if norm:
+            variants.add(norm)
+            # Bei Infinitiven auch Variante ohne "to" erlauben: "to suffer" -> "suffer"
+            if norm.startswith("to "):
+                variants.add(norm[3:])
+    return variants
+
+
+def is_answer_correct(user_input: str, main_answer: str, alternatives: str = "", tolerance: float = 0.92) -> tuple[bool, str]:
+    given = normalize_answer(user_input)
+    variants = answer_variants(main_answer, alternatives)
+    if given in variants:
+        return True, "exakt"
+
+    # leichte Tippfehler tolerieren
+    best_score = 0.0
+    best_variant = ""
+    for variant in variants:
+        score = SequenceMatcher(None, given, variant).ratio()
+        if score > best_score:
+            best_score = score
+            best_variant = variant
+
+    if best_score >= tolerance and len(given) >= 4:
+        return True, f"toleriert wegen Tippähnlichkeit zu '{best_variant}'"
+
+    return False, "falsch"
+
+
+def weighted_next_index(df_filtered: pd.DataFrame, already_seen_ids: set[str] | None = None) -> int:
+    """Wählt schwierige / selten geübte Wörter bevorzugt aus."""
+    if df_filtered.empty:
+        return 0
+
+    work = df_filtered.copy().reset_index(drop=True)
+    already_seen_ids = already_seen_ids or set()
+
+    richtig = pd.to_numeric(work["Richtig"], errors="coerce").fillna(0)
+    falsch = pd.to_numeric(work["Falsch"], errors="coerce").fillna(0)
+    total = richtig + falsch
+    accuracy_penalty = ((falsch + 1) / (total + 2)) * 4
+
+    # Nie oder lange nicht geübt bevorzugen
+    last = pd.to_datetime(work["Zuletzt_geuebt"], errors="coerce")
+    days = (pd.Timestamp.today().normalize() - last.dt.normalize()).dt.days
+    days = days.fillna(30).clip(lower=0, upper=60)
+    recency_bonus = days / 15
+
+    # schon in dieser Session gesehen -> etwas weniger priorisieren
+    seen_penalty = work["ID"].astype(str).isin(already_seen_ids).astype(float) * 2
+
+    weights = (1 + accuracy_penalty + recency_bonus - seen_penalty).clip(lower=0.2)
+    return int(random.choices(range(len(work)), weights=weights, k=1)[0])
+
+# ============================================================
+# Hilfsfunktionen: Audio
+# ============================================================
+
+def tts_audio(text: str, lang: str = "en") -> BytesIO:
+    tts = gTTS(text=str(text), lang=lang)
+    mp3_fp = BytesIO()
+    tts.write_to_fp(mp3_fp)
+    mp3_fp.seek(0)
+    return mp3_fp
+
+# ============================================================
+# OpenAI / KI
+# ============================================================
+
+def get_openai_api_key() -> str | None:
     try:
         if "OPENAI_API_KEY" in st.secrets:
             return st.secrets["OPENAI_API_KEY"]
@@ -39,52 +195,39 @@ def get_openai_api_key():
     return os.getenv("OPENAI_API_KEY")
 
 
-def get_openai_model():
-    """Modell zentral einstellbar machen."""
+def get_openai_model() -> str:
     try:
         if "OPENAI_MODEL" in st.secrets:
             return st.secrets["OPENAI_MODEL"]
     except Exception:
         pass
-    return "gpt-4.1-mini"
+    return DEFAULT_MODEL
 
 
-def extract_json_array(text):
-    """
-    Robustere JSON-Extraktion, falls das Modell versehentlich Text um die JSON-Liste schreibt.
-    Erwartet am Ende eine Liste von Dicts.
-    """
-    text = text.strip()
-    start = text.find("[")
-    end = text.rfind("]") + 1
-
-    if start == -1 or end == 0:
-        raise ValueError("Keine JSON-Liste in der KI-Antwort gefunden.")
-
-    return json.loads(text[start:end])
+def extract_json(text: str):
+    text = str(text).strip()
+    if text.startswith("[") or text.startswith("{"):
+        return json.loads(text)
+    start_list = text.find("[")
+    end_list = text.rfind("]") + 1
+    if start_list >= 0 and end_list > start_list:
+        return json.loads(text[start_list:end_list])
+    start_obj = text.find("{")
+    end_obj = text.rfind("}") + 1
+    if start_obj >= 0 and end_obj > start_obj:
+        return json.loads(text[start_obj:end_obj])
+    raise ValueError("Keine JSON-Struktur gefunden.")
 
 
 @st.cache_data(show_spinner=False)
-def generate_ai_examples(word_de, word_en, level, category, variant=0, n=3):
-    """
-    Erzeugt dynamische Übungssätze für eine Vokabel.
-    Cache verhindert, dass bei jedem Streamlit-Rerun erneut API-Kosten entstehen.
-    variant dient als Cache-Buster, wenn der Nutzer bewusst neue Sätze erzeugen will.
-    """
+def generate_ai_examples(word_de: str, word_en: str, level: str, category: str, variant: int = 0, n: int = 3):
     api_key = get_openai_api_key()
-
     if not api_key:
-        return {
-            "ok": False,
-            "error": "OPENAI_API_KEY fehlt. Bitte in .streamlit/secrets.toml oder als Umgebungsvariable setzen.",
-            "examples": []
-        }
+        return {"ok": False, "error": "OPENAI_API_KEY fehlt.", "examples": []}
 
     client = OpenAI(api_key=api_key)
-
     prompt = f"""
 Du bist ein Englischlehrer für einen deutschen Lerner.
-
 Erstelle {n} neue Übungssätze für einen Vokabeltrainer.
 
 Vokabel Deutsch: {word_de}
@@ -99,368 +242,537 @@ Ziel:
 
 Regeln:
 - Keine Wiederholungen.
-- Keine zu langen Sätze bei "leicht".
-- Bei "komplex" darf der Satz einen Nebensatz enthalten.
-- Bei Business-, Energie- oder Gas-Themen gerne fachnah formulieren.
-- Antworte ausschließlich als JSON-Liste.
-- Keine Markdown-Formatierung.
-- Keine Erklärungen außerhalb der JSON-Liste.
+- Bei "leicht": kurze Sätze und einfache Grammatik.
+- Bei "mittel": natürliche Alltag-/Business-Sätze.
+- Bei "komplex": fachlicher oder längerer Satz mit Nebensatz.
+- Bei Business-, Energie-, Gas- oder Risk-Management-Themen fachnah formulieren.
+- Antworte ausschließlich als JSON-Liste ohne Markdown.
 
 JSON-Format:
 [
-  {{
-    "deutscher_satz": "...",
-    "englischer_satz": "..."
-  }}
+  {{"deutscher_satz": "...", "englischer_satz": "..."}}
 ]
 """
-
     try:
-        response = client.responses.create(
-            model=get_openai_model(),
-            input=prompt,
-        )
-
-        text = response.output_text
-        examples = extract_json_array(text)
-
-        # einfache Validierung
+        response = client.responses.create(model=get_openai_model(), input=prompt)
+        data = extract_json(response.output_text)
         cleaned = []
-        for ex in examples:
+        for ex in data:
             de = str(ex.get("deutscher_satz", "")).strip()
             en = str(ex.get("englischer_satz", "")).strip()
             if de and en:
-                cleaned.append({
-                    "deutscher_satz": de,
-                    "englischer_satz": en
-                })
-
-        return {
-            "ok": True,
-            "error": "",
-            "examples": cleaned[:n]
-        }
-
+                cleaned.append({"deutscher_satz": de, "englischer_satz": en})
+        return {"ok": True, "error": "", "examples": cleaned[:n]}
     except Exception as e:
-        return {
-            "ok": False,
-            "error": str(e),
-            "examples": []
-        }
+        return {"ok": False, "error": str(e), "examples": []}
 
 
-st.title("📘 Vokabeltrainer")
-st.markdown("---")  # horizontale Linie
+def ai_feedback(word_de: str, word_en: str, user_answer: str, category: str):
+    api_key = get_openai_api_key()
+    if not api_key:
+        return {"ok": False, "error": "OPENAI_API_KEY fehlt.", "feedback": ""}
 
-# 📦 Testmodus-Setup
-if "test_aktiv" not in st.session_state:
-    st.session_state.test_aktiv = False
-if "test_vokabeln" not in st.session_state:
-    st.session_state.test_vokabeln = None
-if "test_kategorien" not in st.session_state:
-    st.session_state.test_kategorien = []
-if "test_index" not in st.session_state:
-    st.session_state.test_index = 0
-if "test_ergebnisse" not in st.session_state:
-    st.session_state.test_ergebnisse = []
-if "test_abgeschlossen" not in st.session_state:
-    st.session_state.test_abgeschlossen = False
+    client = OpenAI(api_key=api_key)
+    prompt = f"""
+Du bist ein Englischlehrer für einen deutschen Lerner.
+Bewerte die Antwort kurz und hilfreich.
 
-# 🎓 Testmodus
-st.header("🎓 Test")
+Deutsch: {word_de}
+Gesuchte englische Lösung: {word_en}
+Antwort des Lerners: {user_answer}
+Kategorie: {category}
 
-if not st.session_state.test_aktiv:
-    test_kats = st.multiselect("Wähle die Kategorien für den Test:", df["Kategorie"].dropna().unique())
+Gib aus:
+- ob die Antwort korrekt, teilweise korrekt oder falsch ist
+- die natürliche richtige Formulierung
+- eine kurze Erklärung auf Deutsch
+- ein englisches Beispiel
 
-    if st.button("🎯 Neuer Test starten", disabled=len(test_kats) == 0):
-        gefiltert_test = (
-            df[df["Kategorie"].isin(test_kats)]
-            .dropna(subset=["Deutsch", "Englisch"])
-            .sample(n=min(25, len(df)), random_state=random.randint(0, 9999))
-            .reset_index(drop=True)
-        )
-        st.session_state.test_aktiv = True
-        st.session_state.test_kategorien = test_kats
-        st.session_state.test_vokabeln = gefiltert_test
-        st.session_state.test_index = 0
-        st.session_state.test_ergebnisse = []
-        st.session_state.test_abgeschlossen = False
-        st.rerun()
-else:
-    st.success(f"✅ Test läuft mit Kategorien: {', '.join(st.session_state.test_kategorien)}")
-
-    if st.button("🔄 Test zurücksetzen"):
-        st.session_state.test_index = 0
-        st.session_state.test_ergebnisse = []
-        st.session_state.test_abgeschlossen = False
-        st.rerun()
-
-    if st.button("🆕 Neuer Test starten"):
-        st.session_state.test_aktiv = False
-        st.session_state.test_vokabeln = None
-        st.session_state.test_kategorien = []
-        st.session_state.test_index = 0
-        st.session_state.test_ergebnisse = []
-        st.session_state.test_abgeschlossen = False
-        st.rerun()
-
-    vokabel_df = st.session_state.test_vokabeln
-    idx = st.session_state.test_index
-    if idx < len(vokabel_df):
-        row = vokabel_df.iloc[idx]
-        st.subheader(f"Frage {idx+1}/25 – Übersetze: **{row['Deutsch']}**")
-        user_input = st.text_input("Englische Übersetzung:", key=f"test_eingabe_{idx}")
-
-        if st.button("Antwort prüfen", key=f"test_check_{idx}"):
-            korrekt = user_input.strip().lower() == str(row["Englisch"]).strip().lower()
-            st.session_state.test_vokabeln.at[idx, "User_Eingabe"] = user_input
-            st.session_state.test_ergebnisse.append(korrekt)
-            st.session_state.test_index += 1
-            if st.session_state.test_index >= 25:
-                st.session_state.test_abgeschlossen = True
-            st.rerun()
-    else:
-        st.success("🎉 Test abgeschlossen!")
-        richtig = sum(st.session_state.test_ergebnisse)
-        falsch = len(st.session_state.test_ergebnisse) - richtig
-        st.markdown(f"**Ergebnis: {richtig}/25 richtig!**")
-
-        fig, ax = plt.subplots(figsize=(1, 1))
-        wedges, _, autotexts = ax.pie(
-            [richtig, falsch],
-            labels=["Richtig", "Falsch"],
-            autopct="%1.1f%%",
-            colors=["#2ECC71", "#E74C3C"],
-            startangle=90,
-        )
-        for autotext in autotexts:
-            autotext.set_fontsize(10)
-            autotext.set_color("white")
-        ax.axis("equal")
-        st.pyplot(fig)
-
-        # 📝 Detailauswertung anzeigen
-        st.markdown("### 📋 Detailauswertung")
-        for i, korrekt in enumerate(st.session_state.test_ergebnisse):
-            frage = st.session_state.test_vokabeln.iloc[i]
-            symbol = "✅" if korrekt else "❌"
-            farbe = "green" if korrekt else "red"
-            eingabe = frage.get("User_Eingabe", "–")
-
-            if korrekt:
-                st.markdown(
-                    f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}</span>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f"<span style='color:{farbe}'>{symbol} {frage['Deutsch']} ➜ {frage['Englisch']}<br>"
-                    f"<i>Deine Antwort:</i> <b>{eingabe}</b></span>",
-                    unsafe_allow_html=True,
-                )
-
-# --------------------------------------------------------------------
-st.markdown("---")
-st.header("🏋️‍♂️ Training")
-
-# 🎯 Kategorieauswahl
-kategorien = df["Kategorie"].dropna().unique()
-kategorie = st.selectbox("Kategorie auswählen:", kategorien)
-
-# 🔍 Filter nach Kategorie
-gefiltert = df[df["Kategorie"] == kategorie].reset_index(drop=True)
-
-if gefiltert.empty:
-    st.warning("⚠️ Keine Vokabeln in dieser Kategorie gefunden.")
-    st.stop()
-
-with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
-    for idx, row_ in gefiltert[["Deutsch", "Englisch"]].dropna().reset_index(drop=True).iterrows():
-        col1, col2, col3 = st.columns([4, 4, 1])
-        with col1:
-            st.markdown(f"**🇩🇪 {row_['Deutsch']}**")
-        with col2:
-            st.markdown(f"**🇬🇧 {row_['Englisch']}**")
-        with col3:
-            if st.button("🔊", key=f"tts_{idx}"):
-                tts = gTTS(text=row_["Englisch"], lang="en")
-                mp3_fp = BytesIO()
-                tts.write_to_fp(mp3_fp)
-                mp3_fp.seek(0)
-                st.audio(mp3_fp, format="audio/mp3", start_time=0)
-
-# 🧠 Session-States fürs Training
-if "frage_index" not in st.session_state:
-    st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
-if "antwort_gegeben" not in st.session_state:
-    st.session_state.antwort_gegeben = False
-if "antwort_richtig" not in st.session_state:
-    st.session_state.antwort_richtig = None
-if "zeige_englisch" not in st.session_state:
-    st.session_state.zeige_englisch = False
-if "runde" not in st.session_state:
-    st.session_state.runde = 0
-if "wechsel_timer" not in st.session_state:
-    st.session_state.wechsel_timer = None
-if "abgefragt_kategorie" not in st.session_state:
-    st.session_state.abgefragt_kategorie = {}
-if "reset_antwort" not in st.session_state:
-    st.session_state.reset_antwort = False
-
-if kategorie not in st.session_state.abgefragt_kategorie:
-    st.session_state.abgefragt_kategorie[kategorie] = set()
-
-abgefragt_set = st.session_state.abgefragt_kategorie[kategorie]
-abgefragt_anzahl = len(abgefragt_set)
-gesamt_anzahl = len(gefiltert)
-fortschritt = abgefragt_anzahl / gesamt_anzahl
-
-st.markdown("### 📈 Fortschritt")
-st.progress(fortschritt)
-st.text(f"{abgefragt_anzahl} von {gesamt_anzahl} Vokabeln in dieser Kategorie abgefragt")
-
-if st.button("🔁 Fortschritt zurücksetzen"):
-    st.session_state.abgefragt_kategorie[kategorie] = set()
-    st.rerun()
-
-# 🗣 Aktuelle Vokabel laden
-if st.session_state.frage_index >= len(gefiltert):
-    st.session_state.frage_index = 0
-row = gefiltert.iloc[st.session_state.frage_index]
-vokabel = row["Deutsch"]
-loesung = str(row["Englisch"]).strip().lower()
+Antworte ausschließlich als JSON-Objekt:
+{{
+  "bewertung": "korrekt|teilweise|falsch",
+  "kurze_erklaerung": "...",
+  "bessere_antwort": "...",
+  "beispiel": "..."
+}}
+"""
+    try:
+        response = client.responses.create(model=get_openai_model(), input=prompt)
+        data = extract_json(response.output_text)
+        parts = [
+            f"**Bewertung:** {data.get('bewertung', '')}",
+            f"**Erklärung:** {data.get('kurze_erklaerung', '')}",
+            f"**Bessere Antwort:** {data.get('bessere_antwort', '')}",
+            f"**Beispiel:** {data.get('beispiel', '')}",
+        ]
+        return {"ok": True, "error": "", "feedback": "\n\n".join(parts)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "feedback": ""}
 
 
-# ✅ Antwort prüfen
-def antwort_pruefen():
-    gegeben = st.session_state.get("antwort", "").strip().lower()
-    st.session_state.antwort_gegeben = True
-    st.session_state.antwort_richtig = gegeben == loesung
+def create_cloze_sentence(sentence: str, word_en: str) -> str:
+    """Einfacher Lückentext: ersetzt die Vokabel oder einzelne Bestandteile."""
+    sentence = str(sentence)
+    word = str(word_en).strip()
+    if not sentence or not word:
+        return sentence
 
-    idx_original = df[(df["Deutsch"] == vokabel) & (df["Kategorie"] == kategorie)].index
-    if len(idx_original) > 0:
-        idx = idx_original[0]
-        if st.session_state.antwort_richtig:
-            df.at[idx, "Richtig"] = df.at[idx, "Richtig"] + 1 if not pd.isna(df.at[idx, "Richtig"]) else 1
-        else:
-            df.at[idx, "Falsch"] = df.at[idx, "Falsch"] + 1 if not pd.isna(df.at[idx, "Falsch"]) else 1
-        df.to_excel(excel_path, index=False)
+    # exakte Phrase ersetzen
+    pattern = re.compile(re.escape(word), flags=re.IGNORECASE)
+    if pattern.search(sentence):
+        return pattern.sub("_____", sentence, count=1)
 
-    st.session_state.wechsel_timer = time.time()
+    # falls mit "to": nur Grundverb ersetzen
+    if word.lower().startswith("to "):
+        base = word[3:].strip()
+        pattern = re.compile(r"\b" + re.escape(base) + r"\b", flags=re.IGNORECASE)
+        if pattern.search(sentence):
+            return pattern.sub("_____", sentence, count=1)
 
+    return sentence + "  → _____"
 
-# 🔁 Eingabefeld-Reset (Variante 1)
-if st.session_state.reset_antwort:
-    st.session_state.antwort = ""
-    st.session_state.reset_antwort = False
+# ============================================================
+# UI Setup
+# ============================================================
+st.set_page_config(page_title="Vokabeltrainer", page_icon="📘", layout="wide")
+st.title("📘 Intelligenter Vokabeltrainer")
+st.caption("Mit KI-Beispielsätzen, Lernpriorisierung, Tests, Dashboard und Admin-Bereich")
 
-st.subheader(f"Übersetze: **{vokabel}**")
-antwort = st.text_input(
-    "Englische Übersetzung eingeben:",
-    key="antwort",
-    on_change=antwort_pruefen,
-)
+# Daten laden
+df = load_data()
 
-# ➡️ Nächste Vokabel
-if st.button("➡️ Nächste Vokabel"):
-    st.session_state.abgefragt_kategorie[kategorie].add(st.session_state.frage_index)
-    st.session_state.frage_index = random.randint(0, len(gefiltert) - 1)
-    st.session_state.antwort_gegeben = False
-    st.session_state.antwort_richtig = None
-    st.session_state.zeige_englisch = False
-    st.session_state.reset_antwort = True  # <--- hier setzen wir das Reset-Flag
-    st.rerun()
+if df.empty:
+    st.warning("Deine Excel-Datei enthält noch keine Vokabeln. Öffne den Admin-Bereich und lege die erste Vokabel an.")
 
-# 🟩 Ergebnis-Feedback
-if st.session_state.antwort_gegeben:
-    if st.session_state.antwort_richtig:
-        st.success("✅ Deine Antwort ist korrekt!")
-    else:
-        st.error(f"❌ Leider falsch – richtig wäre: **{loesung}**")
+# Session State
+st.session_state.setdefault("session_seen_ids", set())
+st.session_state.setdefault("current_word_id", None)
+st.session_state.setdefault("antwort_gegeben", False)
+st.session_state.setdefault("antwort_richtig", None)
+st.session_state.setdefault("antwort_hinweis", "")
+st.session_state.setdefault("reset_antwort", False)
+st.session_state.setdefault("last_ai_examples", [])
+st.session_state.setdefault("ai_refresh", 0)
+st.session_state.setdefault("test_aktiv", False)
+st.session_state.setdefault("test_vokabeln", None)
+st.session_state.setdefault("test_index", 0)
+st.session_state.setdefault("test_ergebnisse", [])
 
-# 🤖 KI-Beispielsätze
-st.markdown("### 🤖 KI-Beispielsätze")
+tab_training, tab_test, tab_dashboard, tab_admin, tab_settings = st.tabs([
+    "🏋️ Training",
+    "🎓 Test",
+    "📊 Dashboard",
+    "🛠️ Admin",
+    "⚙️ Einstellungen",
+])
 
-ki_level = st.selectbox(
-    "Schwierigkeit der Beispielsätze:",
-    ["leicht", "mittel", "komplex"],
-    index=1,
-    key=f"ki_level_{kategorie}"
-)
+# ============================================================
+# Training
+# ============================================================
+with tab_training:
+    st.header("🏋️‍♂️ Training")
 
-# Cache-Buster pro Vokabel, damit der Button wirklich neue Sätze erzeugen kann.
-refresh_key = f"ki_refresh_{kategorie}_{st.session_state.frage_index}"
-if refresh_key not in st.session_state:
-    st.session_state[refresh_key] = 0
+    if df.empty:
+        st.stop()
 
-col_ki_1, col_ki_2 = st.columns([1, 1])
-with col_ki_1:
-    auto_ki = st.checkbox(
-        "KI-Sätze automatisch für diese Vokabel erzeugen",
-        value=True,
-        key="auto_ki_examples"
+    categories = sorted([str(x) for x in df["Kategorie"].dropna().unique() if str(x).strip()])
+    selected_category = st.selectbox("Kategorie auswählen:", categories if categories else ["Allgemein"])
+    mode = st.radio(
+        "Lernmodus:",
+        ["Deutsch → Englisch", "Lückentext"],
+        horizontal=True,
     )
 
-with col_ki_2:
-    if st.button("🔄 Neue KI-Beispielsätze erzeugen"):
-        st.session_state[refresh_key] += 1
-        st.rerun()
+    filtered = df[df["Kategorie"].astype(str) == str(selected_category)].copy().reset_index(drop=True)
+    if filtered.empty:
+        st.warning("Keine Vokabeln in dieser Kategorie gefunden.")
+        st.stop()
 
-if auto_ki:
-    englisch_original = str(row["Englisch"]).strip()
+    col_prog1, col_prog2, col_prog3 = st.columns(3)
+    seen_count = len(set(filtered["ID"].astype(str)).intersection(st.session_state.session_seen_ids))
+    with col_prog1:
+        st.metric("Vokabeln in Kategorie", len(filtered))
+    with col_prog2:
+        st.metric("In dieser Session gesehen", seen_count)
+    with col_prog3:
+        avg_acc = ((filtered["Richtig"].sum()) / max((filtered["Richtig"].sum() + filtered["Falsch"].sum()), 1)) * 100
+        st.metric("Trefferquote Kategorie", f"{avg_acc:.0f}%")
 
-    with st.spinner("KI erstellt neue Beispielsätze ..."):
-        result = generate_ai_examples(
-            word_de=vokabel,
-            word_en=englisch_original,
-            level=ki_level,
-            category=kategorie,
-            variant=st.session_state[refresh_key],
-            n=3
-        )
+    st.progress(seen_count / max(len(filtered), 1))
 
-    if not result["ok"]:
-        st.warning(f"⚠️ KI-Beispielsätze konnten nicht erzeugt werden: {result['error']}")
-        st.info("Tipp: Prüfe, ob dein OPENAI_API_KEY korrekt gesetzt ist und ob `openai` installiert ist.")
-    elif len(result["examples"]) == 0:
-        st.warning("⚠️ Die KI hat keine verwertbaren Beispielsätze geliefert.")
-    else:
-        for i, example in enumerate(result["examples"], start=1):
-            deutscher_satz = example["deutscher_satz"]
-            englischer_satz = example["englischer_satz"]
+    with st.expander("📄 Vokabelliste dieser Kategorie anzeigen"):
+        for idx, row_list in filtered[["Deutsch", "Englisch", "Richtig", "Falsch"]].iterrows():
+            c1, c2, c3, c4 = st.columns([3, 3, 1, 1])
+            c1.markdown(f"**🇩🇪 {row_list['Deutsch']}**")
+            c2.markdown(f"**🇬🇧 {row_list['Englisch']}**")
+            c3.caption(f"✅ {row_list['Richtig']}")
+            c4.caption(f"❌ {row_list['Falsch']}")
 
-            with st.container():
-                st.info(deutscher_satz)
+    def set_new_word():
+        next_local_idx = weighted_next_index(filtered, st.session_state.session_seen_ids)
+        st.session_state.current_word_id = str(filtered.iloc[next_local_idx]["ID"])
+        st.session_state.antwort_gegeben = False
+        st.session_state.antwort_richtig = None
+        st.session_state.antwort_hinweis = ""
+        st.session_state.reset_antwort = True
+        st.session_state.last_ai_examples = []
+        st.session_state.ai_refresh += 1
 
-                button_key = f"zeige_ki_uebersetzung_{i}_{st.session_state.frage_index}_{st.session_state[refresh_key]}"
-                if st.button(f"💬 KI-Übersetzung zu Satz {i} anzeigen", key=button_key):
-                    st.success(englischer_satz)
-else:
-    st.info("KI-Beispielsätze sind deaktiviert.")
+    # initiale Vokabel setzen oder bei Kategorienwechsel reparieren
+    valid_ids = set(filtered["ID"].astype(str))
+    if st.session_state.current_word_id not in valid_ids:
+        set_new_word()
 
-# 📊 Statistik
-if st.session_state.antwort_gegeben:
-    richtig = row["Richtig"] if not pd.isna(row["Richtig"]) else 0
-    falsch = row["Falsch"] if not pd.isna(row["Falsch"]) else 0
+    original_idx = find_row_index(df, st.session_state.current_word_id)
+    if original_idx is None:
+        set_new_word()
+        original_idx = find_row_index(df, st.session_state.current_word_id)
+
+    row = df.loc[original_idx]
+    vokabel_de = str(row["Deutsch"]).strip()
+    vokabel_en = str(row["Englisch"]).strip()
+    alternatives = str(row.get("Alternative_Antworten", "")).strip()
+    level_default = str(row.get("Schwierigkeit", DEFAULT_AI_LEVEL)).strip().lower() or DEFAULT_AI_LEVEL
+    if level_default not in ["leicht", "mittel", "komplex"]:
+        level_default = DEFAULT_AI_LEVEL
 
     st.markdown("---")
-    st.markdown("### 📊 Statistik zu dieser Vokabel")
 
-    if richtig == 0 and falsch == 0:
-        st.info("ℹ️ Zu dieser Vokabel gibt es noch keine Statistik.")
+    if mode == "Deutsch → Englisch":
+        st.subheader(f"Übersetze: **{vokabel_de}**")
     else:
-        fig, ax = plt.subplots(figsize=(3, 3))
-        wedges, texts, autotexts = ax.pie(
-            [richtig, falsch],
-            labels=["Richtig", "Falsch"],
-            autopct="%1.1f%%",
-            colors=["#2ECC71", "#E74C3C"],
-            textprops={"fontsize": 10, "color": "black"},
-            startangle=90,
-        )
-        for autotext in autotexts:
-            autotext.set_fontsize(10)
-            autotext.set_color("white")
+        # Für Lückentext bevorzugt gespeicherte oder frisch erzeugte KI-Sätze verwenden
+        base_sentence = ""
+        for i in range(1, 4):
+            if str(row.get(f"KI_EN_{i}", "")).strip():
+                base_sentence = str(row.get(f"KI_EN_{i}", "")).strip()
+                break
+        if not base_sentence:
+            base_sentence = f"I need to use the word {vokabel_en} correctly."
+        st.subheader("Fülle die Lücke:")
+        st.info(create_cloze_sentence(base_sentence, vokabel_en))
 
-        ax.axis("equal")
+    if st.session_state.reset_antwort:
+        st.session_state.antwort = ""
+        st.session_state.reset_antwort = False
+
+    def check_training_answer():
+        user_input = st.session_state.get("antwort", "")
+        correct, reason = is_answer_correct(user_input, vokabel_en, alternatives)
+        st.session_state.antwort_gegeben = True
+        st.session_state.antwort_richtig = correct
+        st.session_state.antwort_hinweis = reason
+
+        idx = find_row_index(df, st.session_state.current_word_id)
+        if idx is not None:
+            if correct:
+                df.at[idx, "Richtig"] = int(df.at[idx, "Richtig"]) + 1
+            else:
+                df.at[idx, "Falsch"] = int(df.at[idx, "Falsch"]) + 1
+            df.at[idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_data(df)
+
+    st.text_input("Englische Antwort eingeben:", key="antwort", on_change=check_training_answer)
+
+    c_next1, c_next2, c_next3 = st.columns([1, 1, 2])
+    with c_next1:
+        if st.button("➡️ Nächste Vokabel", use_container_width=True):
+            st.session_state.session_seen_ids.add(str(st.session_state.current_word_id))
+            set_new_word()
+            st.rerun()
+    with c_next2:
+        if st.button("🔊 Anhören", use_container_width=True):
+            st.audio(tts_audio(vokabel_en, "en"), format="audio/mp3")
+
+    if st.session_state.antwort_gegeben:
+        if st.session_state.antwort_richtig:
+            st.success(f"✅ Deine Antwort ist korrekt! ({st.session_state.antwort_hinweis})")
+        else:
+            st.error(f"❌ Leider falsch – richtig wäre: **{vokabel_en}**")
+            if alternatives:
+                st.caption(f"Auch akzeptiert: {alternatives}")
+
+            with st.expander("🤖 KI-Feedback zu meiner Antwort"):
+                if st.button("Feedback erzeugen", key=f"feedback_{st.session_state.current_word_id}"):
+                    with st.spinner("KI analysiert deine Antwort ..."):
+                        fb = ai_feedback(vokabel_de, vokabel_en, st.session_state.get("antwort", ""), selected_category)
+                    if fb["ok"]:
+                        st.markdown(fb["feedback"])
+                    else:
+                        st.warning(f"Feedback konnte nicht erzeugt werden: {fb['error']}")
+
+    # KI-Beispielsätze
+    st.markdown("---")
+    st.markdown("### 🤖 KI-Beispielsätze")
+    col_ai_a, col_ai_b, col_ai_c = st.columns([1, 1, 1])
+    with col_ai_a:
+        ai_level = st.selectbox("Schwierigkeit:", ["leicht", "mittel", "komplex"], index=["leicht", "mittel", "komplex"].index(level_default))
+    with col_ai_b:
+        use_saved_first = st.checkbox("Gespeicherte Sätze zuerst anzeigen", value=True)
+    with col_ai_c:
+        auto_generate = st.checkbox("Automatisch generieren", value=False)
+
+    saved_examples = []
+    for i in range(1, 4):
+        de = str(row.get(f"KI_DE_{i}", "")).strip()
+        en = str(row.get(f"KI_EN_{i}", "")).strip()
+        if de and en:
+            saved_examples.append({"deutscher_satz": de, "englischer_satz": en, "source": "saved"})
+
+    if use_saved_first and saved_examples:
+        st.caption("Gespeicherte KI-Sätze aus deiner Excel-Datei:")
+        examples_to_show = saved_examples
+    else:
+        examples_to_show = st.session_state.last_ai_examples
+
+    if st.button("🔄 Neue KI-Beispielsätze erzeugen") or (auto_generate and not examples_to_show):
+        with st.spinner("KI erstellt Beispielsätze ..."):
+            result = generate_ai_examples(vokabel_de, vokabel_en, ai_level, selected_category, st.session_state.ai_refresh, 3)
+        st.session_state.ai_refresh += 1
+        if not result["ok"]:
+            st.warning(f"KI-Beispielsätze konnten nicht erzeugt werden: {result['error']}")
+        else:
+            st.session_state.last_ai_examples = result["examples"]
+            examples_to_show = result["examples"]
+
+    if not examples_to_show:
+        st.info("Klicke auf **Neue KI-Beispielsätze erzeugen**. Dadurch entstehen API-Kosten nur bewusst auf Knopfdruck.")
+    else:
+        for i, ex in enumerate(examples_to_show, start=1):
+            with st.container(border=True):
+                st.info(ex["deutscher_satz"])
+                b1, b2, b3 = st.columns([1, 1, 2])
+                with b1:
+                    if st.button(f"💬 Lösung {i}", key=f"show_ai_{i}_{st.session_state.ai_refresh}_{st.session_state.current_word_id}"):
+                        st.success(ex["englischer_satz"])
+                with b2:
+                    if st.button(f"🔊 Satz {i}", key=f"audio_ai_{i}_{st.session_state.ai_refresh}_{st.session_state.current_word_id}"):
+                        st.audio(tts_audio(ex["englischer_satz"], "en"), format="audio/mp3")
+                with b3:
+                    if st.button(f"💾 Satz {i} speichern", key=f"save_ai_{i}_{st.session_state.ai_refresh}_{st.session_state.current_word_id}"):
+                        idx = find_row_index(df, st.session_state.current_word_id)
+                        if idx is not None:
+                            slot = None
+                            for j in range(1, 4):
+                                if not str(df.at[idx, f"KI_DE_{j}"]).strip() and not str(df.at[idx, f"KI_EN_{j}"]).strip():
+                                    slot = j
+                                    break
+                            if slot is None:
+                                slot = 1  # überschreibt ältesten Slot
+                            df.at[idx, f"KI_DE_{slot}"] = ex["deutscher_satz"]
+                            df.at[idx, f"KI_EN_{slot}"] = ex["englischer_satz"]
+                            save_data(df)
+                            st.success(f"Gespeichert in KI_DE_{slot}/KI_EN_{slot}.")
+
+    # Statistik aktuelle Vokabel
+    with st.expander("📊 Statistik zu dieser Vokabel"):
+        r = int(row.get("Richtig", 0) or 0)
+        f = int(row.get("Falsch", 0) or 0)
+        st.write(f"Richtig: **{r}** | Falsch: **{f}** | Zuletzt geübt: **{row.get('Zuletzt_geuebt', '–')}**")
+        if r + f > 0:
+            fig, ax = plt.subplots(figsize=(3, 3))
+            ax.pie([r, f], labels=["Richtig", "Falsch"], autopct="%1.1f%%", startangle=90)
+            ax.axis("equal")
+            st.pyplot(fig)
+
+# ============================================================
+# Test
+# ============================================================
+with tab_test:
+    st.header("🎓 Testmodus")
+    if df.empty:
+        st.stop()
+
+    categories = sorted([str(x) for x in df["Kategorie"].dropna().unique() if str(x).strip()])
+
+    if not st.session_state.test_aktiv:
+        test_kats = st.multiselect("Kategorien für den Test:", categories, default=categories[:1] if categories else [])
+        test_length = st.slider("Anzahl Fragen:", 5, 50, 25, step=5)
+        only_wrong = st.checkbox("Nur schwierige/falsche Wörter bevorzugen", value=True)
+
+        if st.button("🎯 Neuer Test starten", disabled=len(test_kats) == 0):
+            pool = df[df["Kategorie"].astype(str).isin([str(k) for k in test_kats])].dropna(subset=["Deutsch", "Englisch"]).copy()
+            if pool.empty:
+                st.warning("Keine passenden Vokabeln gefunden.")
+            else:
+                if only_wrong:
+                    pool["score"] = pd.to_numeric(pool["Falsch"], errors="coerce").fillna(0) * 3 - pd.to_numeric(pool["Richtig"], errors="coerce").fillna(0)
+                    pool = pool.sort_values("score", ascending=False)
+                if len(pool) > test_length:
+                    pool = pool.sample(n=test_length, random_state=random.randint(0, 99999)) if not only_wrong else pool.head(test_length)
+                st.session_state.test_aktiv = True
+                st.session_state.test_vokabeln = pool.reset_index(drop=True)
+                st.session_state.test_index = 0
+                st.session_state.test_ergebnisse = []
+                st.rerun()
+    else:
+        test_df = st.session_state.test_vokabeln
+        idx = st.session_state.test_index
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if st.button("🔄 Test zurücksetzen"):
+                st.session_state.test_index = 0
+                st.session_state.test_ergebnisse = []
+                st.rerun()
+        with c2:
+            if st.button("🆕 Neuen Test konfigurieren"):
+                st.session_state.test_aktiv = False
+                st.session_state.test_vokabeln = None
+                st.session_state.test_index = 0
+                st.session_state.test_ergebnisse = []
+                st.rerun()
+
+        if idx < len(test_df):
+            row_t = test_df.iloc[idx]
+            st.subheader(f"Frage {idx + 1}/{len(test_df)} – Übersetze: **{row_t['Deutsch']}**")
+            user_input = st.text_input("Englische Übersetzung:", key=f"test_input_{idx}")
+            if st.button("Antwort prüfen", key=f"test_check_{idx}"):
+                correct, reason = is_answer_correct(user_input, row_t["Englisch"], row_t.get("Alternative_Antworten", ""))
+                st.session_state.test_ergebnisse.append({
+                    "Deutsch": row_t["Deutsch"],
+                    "Englisch": row_t["Englisch"],
+                    "Antwort": user_input,
+                    "Korrekt": correct,
+                    "Hinweis": reason,
+                })
+                real_idx = find_row_index(df, row_t["ID"])
+                if real_idx is not None:
+                    if correct:
+                        df.at[real_idx, "Richtig"] = int(df.at[real_idx, "Richtig"]) + 1
+                    else:
+                        df.at[real_idx, "Falsch"] = int(df.at[real_idx, "Falsch"]) + 1
+                    df.at[real_idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    save_data(df)
+                st.session_state.test_index += 1
+                st.rerun()
+        else:
+            results = pd.DataFrame(st.session_state.test_ergebnisse)
+            richtig = int(results["Korrekt"].sum()) if not results.empty else 0
+            total = len(results)
+            st.success(f"🎉 Test abgeschlossen: {richtig}/{total} richtig")
+            if total > 0:
+                fig, ax = plt.subplots(figsize=(3, 3))
+                ax.pie([richtig, total - richtig], labels=["Richtig", "Falsch"], autopct="%1.1f%%", startangle=90)
+                ax.axis("equal")
+                st.pyplot(fig)
+                st.dataframe(results, use_container_width=True)
+
+# ============================================================
+# Dashboard
+# ============================================================
+with tab_dashboard:
+    st.header("📊 Dashboard")
+    if df.empty:
+        st.stop()
+
+    work = df.copy()
+    work["Total"] = pd.to_numeric(work["Richtig"], errors="coerce").fillna(0) + pd.to_numeric(work["Falsch"], errors="coerce").fillna(0)
+    work["Trefferquote"] = work["Richtig"] / work["Total"].replace(0, pd.NA)
+    total_richtig = int(work["Richtig"].sum())
+    total_falsch = int(work["Falsch"].sum())
+    total_answers = total_richtig + total_falsch
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Vokabeln", len(work))
+    m2.metric("Antworten gesamt", total_answers)
+    m3.metric("Richtig", total_richtig)
+    m4.metric("Trefferquote", f"{(total_richtig / max(total_answers, 1)) * 100:.0f}%")
+
+    st.markdown("### Schwierigste Vokabeln")
+    difficult = work.sort_values(["Falsch", "Total"], ascending=False).head(20)
+    st.dataframe(difficult[["Deutsch", "Englisch", "Kategorie", "Richtig", "Falsch", "Zuletzt_geuebt"]], use_container_width=True)
+
+    st.markdown("### Trefferquote je Kategorie")
+    cat = work.groupby("Kategorie", dropna=False)[["Richtig", "Falsch"]].sum().reset_index()
+    cat["Trefferquote"] = cat["Richtig"] / (cat["Richtig"] + cat["Falsch"]).replace(0, pd.NA)
+    st.dataframe(cat, use_container_width=True)
+
+    if not cat.empty:
+        fig, ax = plt.subplots(figsize=(7, 3))
+        ax.bar(cat["Kategorie"].astype(str), cat["Trefferquote"].fillna(0) * 100)
+        ax.set_ylabel("Trefferquote %")
+        ax.tick_params(axis="x", rotation=45)
         st.pyplot(fig)
+
+# ============================================================
+# Admin
+# ============================================================
+with tab_admin:
+    st.header("🛠️ Admin-Bereich")
+
+    with st.expander("➕ Neue Vokabel hinzufügen", expanded=False):
+        with st.form("add_word_form"):
+            new_de = st.text_input("Deutsch")
+            new_en = st.text_input("Englisch")
+            new_cat = st.text_input("Kategorie", value="Allgemein")
+            new_level = st.selectbox("Schwierigkeit", ["leicht", "mittel", "komplex"], index=1)
+            new_alt = st.text_input("Alternative Antworten (mit Semikolon trennen)")
+            submitted = st.form_submit_button("Speichern")
+            if submitted:
+                if not new_de.strip() or not new_en.strip():
+                    st.warning("Deutsch und Englisch müssen gefüllt sein.")
+                else:
+                    new_id = f"W{len(df) + 1:05d}_{int(time.time())}"
+                    new_row = {**BASE_COLUMNS, **KI_COLUMNS}
+                    new_row.update({
+                        "ID": new_id,
+                        "Deutsch": new_de.strip(),
+                        "Englisch": new_en.strip(),
+                        "Kategorie": new_cat.strip() or "Allgemein",
+                        "Schwierigkeit": new_level,
+                        "Alternative_Antworten": new_alt.strip(),
+                    })
+                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    save_data(df)
+                    st.success("Vokabel gespeichert.")
+                    st.rerun()
+
+    st.markdown("### Daten bearbeiten")
+    st.caption("Änderungen in dieser Tabelle werden nach Klick auf 'Änderungen speichern' in die Excel-Datei geschrieben.")
+    edited = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="data_editor")
+    if st.button("💾 Änderungen speichern"):
+        save_data(edited)
+        st.success("Excel-Datei aktualisiert.")
+        st.rerun()
+
+    with st.expander("⬇️ Excel-Datei herunterladen"):
+        buffer = BytesIO()
+        ensure_columns(edited.copy()).to_excel(buffer, index=False)
+        buffer.seek(0)
+        st.download_button(
+            "vokabeln.xlsx herunterladen",
+            data=buffer,
+            file_name="vokabeln.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+# ============================================================
+# Einstellungen
+# ============================================================
+with tab_settings:
+    st.header("⚙️ Einstellungen")
+    st.markdown("### OpenAI / KI")
+    key_exists = bool(get_openai_api_key())
+    st.write("API-Key gefunden:", "✅ ja" if key_exists else "❌ nein")
+    st.write("Aktuelles Modell:", get_openai_model())
+
+    st.info(
+        "Für Streamlit Cloud den Key unter App settings → Secrets eintragen:\n\n"
+        'OPENAI_API_KEY = "sk-..."\n'
+        f'OPENAI_MODEL = "{DEFAULT_MODEL}"'
+    )
+
+    st.markdown("### Kostenkontrolle")
+    st.write(
+        "Die App generiert KI-Beispielsätze standardmäßig nur auf Knopfdruck. "
+        "So vermeidest du unnötige API-Anfragen durch Streamlit-Reruns."
+    )
+
+    st.markdown("### Benötigte requirements.txt")
+    st.code("""streamlit
+pandas
+openpyxl
+matplotlib
+gtts
+openai
+""", language="text")
