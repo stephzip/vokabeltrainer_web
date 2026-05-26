@@ -44,26 +44,19 @@ KI_COLUMNS = {
     "KI_EN_3": "",
 }
 
-SYNONYM_COLUMNS = {
-    "Synonyme_EN": "",
-    "Synonyme_DE": "",
-    "Antonyme_EN": "",
-    "Synonym_Notiz": "",
-}
-
 # ============================================================
 # Hilfsfunktionen: Datei / Daten
 # ============================================================
 
 def ensure_excel_exists() -> None:
     if not os.path.exists(EXCEL_PATH):
-        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()))
+        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()))
         df.to_excel(EXCEL_PATH, index=False)
 
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Stellt sicher, dass alle benötigten Spalten existieren."""
-    for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.items():
+    for col, default in {**BASE_COLUMNS, **KI_COLUMNS}.items():
         if col not in df.columns:
             df[col] = default
 
@@ -317,68 +310,6 @@ Antworte ausschließlich als JSON-Objekt:
         return {"ok": False, "error": str(e), "feedback": ""}
 
 
-
-
-def generate_ai_synonyms(word_de: str, word_en: str, category: str, level: str = "mittel", variant: int = 0):
-    """Erzeugt kontextbezogene Synonyme/Antonyme für eine Vokabel."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY fehlt.", "data": {}}
-
-    client = OpenAI(api_key=api_key)
-    prompt = f"""
-Du bist ein Englischlehrer für einen deutschen Lerner.
-Erstelle sinnvolle Synonyme für eine Vokabel. Achte streng auf den Kontext.
-
-Deutsch: {word_de}
-Englisch: {word_en}
-Kategorie: {category}
-Schwierigkeit: {level}
-Variante: {variant}
-
-Regeln:
-- Gib maximal 6 englische Synonyme oder sehr nahe Alternativen aus.
-- Gib maximal 6 deutsche Synonyme/Näherungen aus.
-- Gib maximal 4 englische Antonyme aus, nur wenn sinnvoll.
-- Nimm nur Alternativen auf, die als Antwort in einem Vokabeltrainer vertretbar wären.
-- Falls etwas kontextabhängig ist, erkläre es kurz in der Notiz.
-- Keine Markdown-Ausgabe, ausschließlich JSON.
-
-JSON-Format:
-{{
-  "synonyme_en": ["...", "..."],
-  "synonyme_de": ["...", "..."],
-  "antonyme_en": ["...", "..."],
-  "notiz_de": "..."
-}}
-"""
-    try:
-        response = client.responses.create(model=get_openai_model(), input=prompt)
-        data = extract_json(response.output_text)
-
-        def clean_list(values, limit):
-            if not isinstance(values, list):
-                return []
-            cleaned = []
-            seen = set()
-            for value in values:
-                text = str(value).strip()
-                key = text.lower()
-                if text and key not in seen:
-                    cleaned.append(text)
-                    seen.add(key)
-            return cleaned[:limit]
-
-        result = {
-            "synonyme_en": clean_list(data.get("synonyme_en", []), 6),
-            "synonyme_de": clean_list(data.get("synonyme_de", []), 6),
-            "antonyme_en": clean_list(data.get("antonyme_en", []), 4),
-            "notiz_de": str(data.get("notiz_de", "")).strip(),
-        }
-        return {"ok": True, "error": "", "data": result}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "data": {}}
-
 def create_cloze_sentence(sentence: str, word_en: str) -> str:
     """Einfacher Lückentext: ersetzt die Vokabel oder einzelne Bestandteile."""
     sentence = str(sentence)
@@ -421,9 +352,7 @@ st.session_state.setdefault("antwort_richtig", None)
 st.session_state.setdefault("antwort_hinweis", "")
 st.session_state.setdefault("reset_antwort", False)
 st.session_state.setdefault("last_ai_examples", [])
-st.session_state.setdefault("last_ai_synonyms", None)
 st.session_state.setdefault("ai_refresh", 0)
-st.session_state.setdefault("synonym_refresh", 0)
 st.session_state.setdefault("test_aktiv", False)
 st.session_state.setdefault("test_vokabeln", None)
 st.session_state.setdefault("test_index", 0)
@@ -487,9 +416,7 @@ with tab_training:
         st.session_state.antwort_hinweis = ""
         st.session_state.reset_antwort = True
         st.session_state.last_ai_examples = []
-        st.session_state.last_ai_synonyms = None
         st.session_state.ai_refresh += 1
-        st.session_state.synonym_refresh += 1
 
     # initiale Vokabel setzen oder bei Kategorienwechsel reparieren
     valid_ids = set(filtered["ID"].astype(str))
@@ -505,11 +432,6 @@ with tab_training:
     vokabel_de = str(row["Deutsch"]).strip()
     vokabel_en = str(row["Englisch"]).strip()
     alternatives = str(row.get("Alternative_Antworten", "")).strip()
-    synonyms_en = str(row.get("Synonyme_EN", "")).strip()
-    synonyms_de = str(row.get("Synonyme_DE", "")).strip()
-    antonyms_en = str(row.get("Antonyme_EN", "")).strip()
-    synonym_note = str(row.get("Synonym_Notiz", "")).strip()
-    accepted_answers = "; ".join([x for x in [alternatives, synonyms_en] if str(x).strip()])
     level_default = str(row.get("Schwierigkeit", DEFAULT_AI_LEVEL)).strip().lower() or DEFAULT_AI_LEVEL
     if level_default not in ["leicht", "mittel", "komplex"]:
         level_default = DEFAULT_AI_LEVEL
@@ -536,7 +458,7 @@ with tab_training:
 
     def check_training_answer():
         user_input = st.session_state.get("antwort", "")
-        correct, reason = is_answer_correct(user_input, vokabel_en, accepted_answers)
+        correct, reason = is_answer_correct(user_input, vokabel_en, alternatives)
         st.session_state.antwort_gegeben = True
         st.session_state.antwort_richtig = correct
         st.session_state.antwort_hinweis = reason
@@ -567,8 +489,8 @@ with tab_training:
             st.success(f"✅ Deine Antwort ist korrekt! ({st.session_state.antwort_hinweis})")
         else:
             st.error(f"❌ Leider falsch – richtig wäre: **{vokabel_en}**")
-            if accepted_answers:
-                st.caption(f"Auch akzeptiert: {accepted_answers}")
+            if alternatives:
+                st.caption(f"Auch akzeptiert: {alternatives}")
 
             with st.expander("🤖 KI-Feedback zu meiner Antwort"):
                 if st.button("Feedback erzeugen", key=f"feedback_{st.session_state.current_word_id}"):
@@ -578,82 +500,6 @@ with tab_training:
                         st.markdown(fb["feedback"])
                     else:
                         st.warning(f"Feedback konnte nicht erzeugt werden: {fb['error']}")
-
-    # Synonyme
-    st.markdown("---")
-    st.markdown("### 🔎 Synonyme")
-    st.caption("Synonyme können angezeigt, per KI erzeugt und in deiner Excel-Datei gespeichert werden. Englisch-Synonyme werden zusätzlich als erlaubte Antworten gewertet.")
-
-    syn_col1, syn_col2, syn_col3 = st.columns([1, 1, 1])
-    with syn_col1:
-        st.markdown("**Englische Synonyme**")
-        st.write(synonyms_en if synonyms_en else "–")
-    with syn_col2:
-        st.markdown("**Deutsche Synonyme**")
-        st.write(synonyms_de if synonyms_de else "–")
-    with syn_col3:
-        st.markdown("**Englische Antonyme**")
-        st.write(antonyms_en if antonyms_en else "–")
-
-    if synonym_note:
-        st.info(f"Notiz: {synonym_note}")
-
-    syn_btn1, syn_btn2 = st.columns([1, 2])
-    with syn_btn1:
-        generate_syn_clicked = st.button("🔎 KI-Synonyme erzeugen", use_container_width=True)
-    with syn_btn2:
-        st.caption("Tipp: Prüfe KI-Synonyme kurz fachlich, bevor du sie dauerhaft speicherst.")
-
-    if generate_syn_clicked:
-        with st.spinner("KI erzeugt Synonyme ..."):
-            syn_result = generate_ai_synonyms(
-                word_de=vokabel_de,
-                word_en=vokabel_en,
-                category=selected_category,
-                level=level_default,
-                variant=st.session_state.synonym_refresh,
-            )
-        st.session_state.synonym_refresh += 1
-        if syn_result["ok"]:
-            st.session_state.last_ai_synonyms = {
-                "word_id": st.session_state.current_word_id,
-                **syn_result["data"],
-            }
-        else:
-            st.warning(f"Synonyme konnten nicht erzeugt werden: {syn_result['error']}")
-
-    syn_data = st.session_state.last_ai_synonyms
-    if syn_data and syn_data.get("word_id") == st.session_state.current_word_id:
-        with st.container(border=True):
-            st.markdown("**KI-Vorschlag**")
-            st.write("**Synonyme EN:** " + ("; ".join(syn_data.get("synonyme_en", [])) or "–"))
-            st.write("**Synonyme DE:** " + ("; ".join(syn_data.get("synonyme_de", [])) or "–"))
-            st.write("**Antonyme EN:** " + ("; ".join(syn_data.get("antonyme_en", [])) or "–"))
-            if syn_data.get("notiz_de"):
-                st.info(syn_data.get("notiz_de"))
-
-            save_syn_col1, save_syn_col2 = st.columns([1, 1])
-            with save_syn_col1:
-                if st.button("💾 Synonyme speichern", use_container_width=True):
-                    idx = find_row_index(df, st.session_state.current_word_id)
-                    if idx is not None:
-                        df.at[idx, "Synonyme_EN"] = "; ".join(syn_data.get("synonyme_en", []))
-                        df.at[idx, "Synonyme_DE"] = "; ".join(syn_data.get("synonyme_de", []))
-                        df.at[idx, "Antonyme_EN"] = "; ".join(syn_data.get("antonyme_en", []))
-                        df.at[idx, "Synonym_Notiz"] = syn_data.get("notiz_de", "")
-                        save_data(df)
-                        st.success("Synonyme wurden in der Excel-Datei gespeichert.")
-                        st.rerun()
-            with save_syn_col2:
-                if st.button("➕ Zu alternativen Antworten hinzufügen", use_container_width=True):
-                    idx = find_row_index(df, st.session_state.current_word_id)
-                    if idx is not None:
-                        existing = str(df.at[idx, "Alternative_Antworten"] or "").strip()
-                        additions = "; ".join(syn_data.get("synonyme_en", []))
-                        df.at[idx, "Alternative_Antworten"] = "; ".join([x for x in [existing, additions] if x])
-                        save_data(df)
-                        st.success("Synonyme wurden zusätzlich zu Alternative_Antworten hinzugefügt.")
-                        st.rerun()
 
     # KI-Beispielsätze
     st.markdown("---")
@@ -781,11 +627,7 @@ with tab_test:
             st.subheader(f"Frage {idx + 1}/{len(test_df)} – Übersetze: **{row_t['Deutsch']}**")
             user_input = st.text_input("Englische Übersetzung:", key=f"test_input_{idx}")
             if st.button("Antwort prüfen", key=f"test_check_{idx}"):
-                test_accepted = "; ".join([
-                    str(row_t.get("Alternative_Antworten", "") or ""),
-                    str(row_t.get("Synonyme_EN", "") or ""),
-                ])
-                correct, reason = is_answer_correct(user_input, row_t["Englisch"], test_accepted)
+                correct, reason = is_answer_correct(user_input, row_t["Englisch"], row_t.get("Alternative_Antworten", ""))
                 st.session_state.test_ergebnisse.append({
                     "Deutsch": row_t["Deutsch"],
                     "Englisch": row_t["Englisch"],
@@ -865,8 +707,6 @@ with tab_admin:
             new_cat = st.text_input("Kategorie", value="Allgemein")
             new_level = st.selectbox("Schwierigkeit", ["leicht", "mittel", "komplex"], index=1)
             new_alt = st.text_input("Alternative Antworten (mit Semikolon trennen)")
-            new_syn_en = st.text_input("Synonyme Englisch (mit Semikolon trennen)")
-            new_syn_de = st.text_input("Synonyme Deutsch (mit Semikolon trennen)")
             submitted = st.form_submit_button("Speichern")
             if submitted:
                 if not new_de.strip() or not new_en.strip():
@@ -881,8 +721,6 @@ with tab_admin:
                         "Kategorie": new_cat.strip() or "Allgemein",
                         "Schwierigkeit": new_level,
                         "Alternative_Antworten": new_alt.strip(),
-                        "Synonyme_EN": new_syn_en.strip(),
-                        "Synonyme_DE": new_syn_de.strip(),
                     })
                     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                     save_data(df)
