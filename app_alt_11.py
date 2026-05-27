@@ -202,23 +202,12 @@ def google_sheets_configured() -> bool:
     return bool(get_google_sheet_id() and get_google_credentials_dict())
 
 
-@st.cache_resource(show_spinner=False)
-def get_google_client_cached(creds_json: str):
-    """Cached Google-Client, damit die Authentifizierung nicht bei jedem Rerun neu aufgebaut wird."""
-    creds_dict = json.loads(creds_json)
-    if "private_key" in creds_dict:
-        creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
-
-
 def get_google_client():
     creds_dict = get_google_credentials_dict()
     if not creds_dict:
         raise RuntimeError("Google-Service-Account fehlt in Streamlit Secrets unter [gcp_service_account].")
-
-    creds_json = json.dumps(creds_dict, sort_keys=True)
-    return get_google_client_cached(creds_json)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
 
 
 def get_vocab_worksheet():
@@ -254,7 +243,7 @@ def ensure_excel_exists() -> None:
         df.to_excel(EXCEL_PATH, index=False)
 
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False)
 def load_data_cached(source_key: str) -> pd.DataFrame:
     """Lädt Vokabeln aus Google Sheets. Falls nicht konfiguriert: lokaler Excel-Fallback."""
     if google_sheets_configured():
@@ -312,7 +301,6 @@ def load_data() -> pd.DataFrame:
 
 
 def save_data(df: pd.DataFrame) -> None:
-    """Speichert die komplette Vokabelliste. Nur für große Änderungen nutzen."""
     df = ensure_columns(df.copy()).fillna("")
 
     if google_sheets_configured():
@@ -326,73 +314,6 @@ def save_data(df: pd.DataFrame) -> None:
         df.to_excel(EXCEL_PATH, index=False)
 
     st.cache_data.clear()
-
-
-def _column_letter(col_count: int) -> str:
-    """Hilfsfunktion: Spaltennummer -> Google-Sheets-Spaltenbuchstabe."""
-    return re.sub(r"\d+", "", gspread.utils.rowcol_to_a1(1, int(col_count)))
-
-
-def update_google_sheet_row(df: pd.DataFrame, row_idx: int) -> None:
-    """
-    Aktualisiert nur eine einzelne Datenzeile in Google Sheets.
-    Das ist deutlich schneller als save_data(df), weil nicht das komplette Sheet neu geschrieben wird.
-    """
-    df_clean = ensure_columns(df.copy()).fillna("")
-
-    if not google_sheets_configured():
-        save_data(df_clean)
-        return
-
-    ws = get_vocab_worksheet()
-    headers = df_clean.columns.tolist()
-
-    current_headers = ws.row_values(1)
-    if current_headers != headers:
-        # Falls sich Spalten geändert haben, ist ein Vollspeichern sicherer.
-        save_data(df_clean)
-        return
-
-    google_row_number = int(row_idx) + 2  # Zeile 1 = Header
-    row_values = df_clean.loc[row_idx, headers].astype(str).tolist()
-    end_col = _column_letter(len(headers))
-    cell_range = f"A{google_row_number}:{end_col}{google_row_number}"
-
-    ws.update(values=[row_values], range_name=cell_range)
-    st.cache_data.clear()
-
-
-def append_vocab_rows(df_current: pd.DataFrame, rows_to_add: list[dict]) -> pd.DataFrame:
-    """
-    Fügt neue Vokabelzeilen an, ohne das komplette Google Sheet neu zu schreiben.
-    Gibt den kombinierten DataFrame zurück.
-    """
-    if not rows_to_add:
-        return df_current
-
-    df_current_clean = ensure_columns(df_current.copy()).fillna("")
-    new_rows_df = ensure_columns(pd.DataFrame(rows_to_add)).fillna("")
-    new_rows_df = new_rows_df.reindex(columns=df_current_clean.columns, fill_value="")
-
-    combined = pd.concat([df_current_clean, new_rows_df], ignore_index=True)
-    combined = ensure_columns(combined).fillna("")
-
-    if google_sheets_configured():
-        ws = get_vocab_worksheet()
-        headers = combined.columns.tolist()
-        current_headers = ws.row_values(1)
-
-        if current_headers != headers:
-            # Falls Header nicht passen, einmal sauber vollständig schreiben.
-            save_data(combined)
-        else:
-            rows_values = new_rows_df.reindex(columns=headers, fill_value="").astype(str).values.tolist()
-            ws.append_rows(rows_values, value_input_option="USER_ENTERED")
-            st.cache_data.clear()
-    else:
-        save_data(combined)
-
-    return combined
 
 
 def find_row_index(df: pd.DataFrame, word_id: str) -> int | None:
@@ -435,7 +356,7 @@ def get_settings_worksheet():
         return None
     return get_or_create_worksheet("Einstellungen", SETTINGS_COLUMNS, rows=100, cols=5)
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False)
 def load_history_cached(source_key: str) -> pd.DataFrame:
     if google_sheets_configured():
         ws = get_history_worksheet()
@@ -1588,7 +1509,7 @@ with tab_training:
             else:
                 df.at[idx, "Falsch"] = int(df.at[idx, "Falsch"]) + 1
             df.at[idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            update_google_sheet_row(df, idx)
+            save_data(df)
             append_learning_event(
                 word_id=st.session_state.current_word_id,
                 deutsch=vokabel_de,
@@ -1695,8 +1616,8 @@ with tab_training:
                         df.at[idx, "Synonyme_DE"] = "; ".join(syn_data.get("synonyme_de", []))
                         df.at[idx, "Antonyme_EN"] = "; ".join(syn_data.get("antonyme_en", []))
                         df.at[idx, "Synonym_Notiz"] = syn_data.get("notiz_de", "")
-                        update_google_sheet_row(df, idx)
-                        st.success("Synonyme wurden in Google Sheets gespeichert.")
+                        save_data(df)
+                        st.success("Synonyme wurden in der Excel-Datei gespeichert.")
                         st.rerun()
             with save_syn_col2:
                 if st.button("➕ Zu alternativen Antworten hinzufügen", use_container_width=True):
@@ -1705,7 +1626,7 @@ with tab_training:
                         existing = str(df.at[idx, "Alternative_Antworten"] or "").strip()
                         additions = "; ".join(syn_data.get("synonyme_en", []))
                         df.at[idx, "Alternative_Antworten"] = "; ".join([x for x in [existing, additions] if x])
-                        update_google_sheet_row(df, idx)
+                        save_data(df)
                         st.success("Synonyme wurden zusätzlich zu Alternative_Antworten hinzugefügt.")
                         st.rerun()
 
@@ -1762,7 +1683,7 @@ with tab_training:
                     df.at[idx, "Wortart"] = "verb" if verb_data.get("is_verb", False) else "kein Verb"
                     df.at[idx, "Verbformen_JSON"] = json.dumps(verb_data, ensure_ascii=False)
                     df.at[idx, "Verbformen_Notiz"] = str(verb_data.get("note_de", "")).strip()
-                    update_google_sheet_row(df, idx)
+                    save_data(df)
                     st.success("Verbformen wurden in Google Sheets gespeichert.")
                     st.rerun()
                 else:
@@ -1828,7 +1749,7 @@ with tab_training:
                                 slot = 1  # überschreibt ältesten Slot
                             df.at[idx, f"KI_DE_{slot}"] = ex["deutscher_satz"]
                             df.at[idx, f"KI_EN_{slot}"] = ex["englischer_satz"]
-                            update_google_sheet_row(df, idx)
+                            save_data(df)
                             st.success(f"Gespeichert in KI_DE_{slot}/KI_EN_{slot}.")
 
     # Statistik aktuelle Vokabel
@@ -1934,7 +1855,7 @@ with tab_test:
                     else:
                         df.at[real_idx, "Falsch"] = int(df.at[real_idx, "Falsch"]) + 1
                     df.at[real_idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    update_google_sheet_row(df, real_idx)
+                    save_data(df)
                     append_learning_event(
                         word_id=str(row_t["ID"]),
                         deutsch=str(row_t["Deutsch"]),
@@ -2134,32 +2055,30 @@ with tab_admin:
                         "Synonyme_DE": new_syn_de.strip(),
                     })
 
-                    append_vocab_rows(df, [new_row])
+                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    df = assign_missing_numeric_ids(df)
+                    save_data(df)
 
                     st.success(f"Vokabel gespeichert mit ID {new_id}.")
                     st.rerun()
 
     st.markdown("### Daten bearbeiten")
-    st.caption("Die große Bearbeitungstabelle wird erst geöffnet, wenn du sie wirklich brauchst. Das reduziert Ladezeit im Admin-Bereich.")
+    st.caption("Änderungen in dieser Tabelle werden nach Klick auf 'Änderungen speichern' in Google Sheets gespeichert.")
 
-    edited = df.copy()
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="data_editor"
+    )
 
-    with st.expander("📋 Tabelle bearbeiten", expanded=False):
-        st.caption("Änderungen werden erst nach Klick auf 'Änderungen speichern' in Google Sheets gespeichert.")
-        edited = st.data_editor(
-            df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="data_editor"
-        )
+    if st.button("💾 Änderungen speichern"):
+        edited = ensure_columns(edited.copy())
+        edited = assign_missing_numeric_ids(edited)
+        save_data(edited)
 
-        if st.button("💾 Änderungen speichern"):
-            edited = ensure_columns(edited.copy())
-            edited = assign_missing_numeric_ids(edited)
-            save_data(edited)
-
-            st.success("Google Sheet aktualisiert.")
-            st.rerun()
+        st.success("Google Sheet aktualisiert.")
+        st.rerun()
 
     with st.expander("⬇️ Vokabelliste als Excel herunterladen"):
         buffer = BytesIO()
@@ -2286,7 +2205,8 @@ with tab_generator:
                         rows_to_add.append(new_row)
 
                     if rows_to_add:
-                        append_vocab_rows(df, rows_to_add)
+                        df_new = pd.concat([df, pd.DataFrame(rows_to_add)], ignore_index=True)
+                        save_data(df_new)
                         st.success(f"{len(rows_to_add)} neue Vokabeln wurden in Google Sheets gespeichert.")
                         if skipped_duplicates:
                             st.info("Übersprungene Duplikate: " + "; ".join(skipped_duplicates[:10]))
