@@ -51,28 +51,6 @@ SYNONYM_COLUMNS = {
     "Synonym_Notiz": "",
 }
 
-VERB_COLUMNS = {
-    "Wortart": "",
-    "Verbformen_JSON": "",
-    "Verbformen_Notiz": "",
-}
-
-HISTORY_COLUMNS = [
-    "Zeitstempel",
-    "Datum",
-    "ID",
-    "Deutsch",
-    "Englisch",
-    "Kategorie",
-    "Modus",
-    "Antwort",
-    "Erwartete_Antwort",
-    "Korrekt",
-    "Hinweis",
-]
-
-SETTINGS_COLUMNS = ["Key", "Value"]
-
 # ------------------------------------------------------------
 # 🔐 Passwortschutz
 # ------------------------------------------------------------
@@ -131,7 +109,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Stellt sicher, dass alle benötigten Spalten existieren."""
     df = df.copy()
 
-    for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}.items():
+    for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.items():
         if col not in df.columns:
             df[col] = default
 
@@ -230,7 +208,7 @@ def get_vocab_worksheet():
     except WorksheetNotFound:
         # Falls der Tab fehlt, automatisch anlegen.
         ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=50)
-        empty_df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}.keys()))
+        empty_df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
         values = [empty_df.columns.tolist()]
         ws.update(values)
         return ws
@@ -239,7 +217,7 @@ def get_vocab_worksheet():
 def ensure_excel_exists() -> None:
     """Nur noch als lokaler Fallback, falls Google Sheets nicht konfiguriert ist."""
     if not os.path.exists(EXCEL_PATH):
-        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()) + list(VERB_COLUMNS.keys()))
+        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()))
         df.to_excel(EXCEL_PATH, index=False)
 
 
@@ -282,7 +260,7 @@ def load_data_cached(source_key: str) -> pd.DataFrame:
             df = df[~(df.astype(str).apply(lambda row: "".join(row).strip(), axis=1) == "")]
 
         if df.empty:
-            df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}.keys()))
+            df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
         return ensure_columns(df)
 
     # Fallback für lokale Tests ohne Google Secrets
@@ -319,182 +297,6 @@ def save_data(df: pd.DataFrame) -> None:
 def find_row_index(df: pd.DataFrame, word_id: str) -> int | None:
     matches = df.index[df["ID"].astype(str) == str(word_id)].tolist()
     return matches[0] if matches else None
-
-
-# ============================================================
-# Hilfsfunktionen: Lernhistorie / Tagesziel / Streak
-# ============================================================
-
-def get_or_create_worksheet(sheet_name: str, headers: list[str], rows: int = 1000, cols: int = 30):
-    """Holt oder erstellt ein zusätzliches Google-Sheet-Worksheet."""
-    sheet_id = get_google_sheet_id()
-    if not sheet_id:
-        return None
-
-    gc = get_google_client()
-    sh = gc.open_by_key(sheet_id)
-
-    try:
-        ws = sh.worksheet(sheet_name)
-    except WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=rows, cols=cols)
-        ws.update([headers])
-        return ws
-
-    values = ws.get_all_values()
-    if not values:
-        ws.update([headers])
-    return ws
-
-def get_history_worksheet():
-    if not google_sheets_configured():
-        return None
-    return get_or_create_worksheet("Lernhistorie", HISTORY_COLUMNS, rows=3000, cols=len(HISTORY_COLUMNS) + 2)
-
-def get_settings_worksheet():
-    if not google_sheets_configured():
-        return None
-    return get_or_create_worksheet("Einstellungen", SETTINGS_COLUMNS, rows=100, cols=5)
-
-@st.cache_data(show_spinner=False)
-def load_history_cached(source_key: str) -> pd.DataFrame:
-    if google_sheets_configured():
-        ws = get_history_worksheet()
-        if ws is None:
-            return pd.DataFrame(columns=HISTORY_COLUMNS)
-        values = ws.get_all_values()
-        if not values:
-            return pd.DataFrame(columns=HISTORY_COLUMNS)
-        headers = values[0]
-        rows = values[1:]
-        if not headers:
-            return pd.DataFrame(columns=HISTORY_COLUMNS)
-        hist = pd.DataFrame(rows, columns=headers)
-        for col in HISTORY_COLUMNS:
-            if col not in hist.columns:
-                hist[col] = ""
-        return hist[HISTORY_COLUMNS].fillna("")
-
-    path = "lernhistorie.csv"
-    if os.path.exists(path):
-        return pd.read_csv(path, dtype=str).fillna("")
-    return pd.DataFrame(columns=HISTORY_COLUMNS)
-
-def load_history() -> pd.DataFrame:
-    if google_sheets_configured():
-        source_key = f"history:{get_google_sheet_id()}:Lernhistorie"
-    else:
-        path = "lernhistorie.csv"
-        source_key = f"history_local:{os.path.getmtime(path) if os.path.exists(path) else 0}"
-    return load_history_cached(source_key).copy()
-
-def append_learning_event(
-    word_id: str,
-    deutsch: str,
-    englisch: str,
-    kategorie: str,
-    modus: str,
-    antwort: str,
-    erwartete_antwort: str,
-    korrekt: bool,
-    hinweis: str = "",
-) -> None:
-    """Schreibt eine Antwort in die Lernhistorie."""
-    now = datetime.now()
-    row_values = [
-        now.strftime("%Y-%m-%d %H:%M:%S"),
-        now.strftime("%Y-%m-%d"),
-        str(word_id),
-        str(deutsch),
-        str(englisch),
-        str(kategorie),
-        str(modus),
-        str(antwort),
-        str(erwartete_antwort),
-        "TRUE" if korrekt else "FALSE",
-        str(hinweis),
-    ]
-
-    if google_sheets_configured():
-        ws = get_history_worksheet()
-        ws.append_row(row_values, value_input_option="USER_ENTERED")
-    else:
-        path = "lernhistorie.csv"
-        hist = load_history()
-        hist = pd.concat([hist, pd.DataFrame([dict(zip(HISTORY_COLUMNS, row_values))])], ignore_index=True)
-        hist.to_csv(path, index=False)
-
-    st.cache_data.clear()
-
-def get_setting_value(key: str, default: str = "") -> str:
-    if google_sheets_configured():
-        try:
-            ws = get_settings_worksheet()
-            values = ws.get_all_records()
-            for item in values:
-                if str(item.get("Key", "")).strip() == key:
-                    return str(item.get("Value", default)).strip()
-        except Exception:
-            return default
-    return default
-
-def set_setting_value(key: str, value: str) -> None:
-    if not google_sheets_configured():
-        return
-    ws = get_settings_worksheet()
-    values = ws.get_all_values()
-    if not values:
-        ws.update([SETTINGS_COLUMNS])
-        values = [SETTINGS_COLUMNS]
-
-    for row_idx, row_values in enumerate(values[1:], start=2):
-        if len(row_values) >= 1 and str(row_values[0]).strip() == key:
-            ws.update_cell(row_idx, 2, str(value))
-            st.cache_data.clear()
-            return
-
-    ws.append_row([key, str(value)], value_input_option="USER_ENTERED")
-    st.cache_data.clear()
-
-def calculate_current_streak(history: pd.DataFrame) -> int:
-    """Berechnet die aktuelle Lernserie in Tagen, endend heute."""
-    if history.empty or "Datum" not in history.columns:
-        return 0
-
-    dates = pd.to_datetime(history["Datum"], errors="coerce").dropna().dt.normalize()
-    if dates.empty:
-        return 0
-
-    learned_dates = set(dates.dt.date)
-    day = pd.Timestamp.today().normalize().date()
-    streak = 0
-
-    while day in learned_dates:
-        streak += 1
-        day = (pd.Timestamp(day) - pd.Timedelta(days=1)).date()
-
-    return streak
-
-def history_summary(history: pd.DataFrame, daily_goal: int) -> dict:
-    if history.empty:
-        return {"today_answers": 0, "today_correct": 0, "today_words": 0, "streak": 0, "goal_progress": 0.0}
-
-    hist = history.copy()
-    hist["Datum_dt"] = pd.to_datetime(hist.get("Datum", ""), errors="coerce")
-    hist["Korrekt_bool"] = hist.get("Korrekt", "").astype(str).str.lower().isin(["true", "1", "ja", "yes"])
-    today = pd.Timestamp.today().normalize()
-    today_hist = hist[hist["Datum_dt"].dt.normalize() == today]
-
-    today_answers = len(today_hist)
-    today_correct = int(today_hist["Korrekt_bool"].sum()) if not today_hist.empty else 0
-    today_words = int(today_hist["ID"].astype(str).nunique()) if not today_hist.empty and "ID" in today_hist.columns else 0
-    return {
-        "today_answers": today_answers,
-        "today_correct": today_correct,
-        "today_words": today_words,
-        "streak": calculate_current_streak(hist),
-        "goal_progress": min(today_answers / max(int(daily_goal), 1), 1.0),
-    }
 
 
 
@@ -828,150 +630,6 @@ JSON-Format:
 
 
 
-def generate_ai_verb_forms(word_de: str, word_en: str, category: str, level: str = "mittel", variant: int = 0):
-    """Erzeugt Verbformen und Zeitformen für englische Verben."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY fehlt.", "data": {}}
-
-    client = OpenAI(api_key=api_key)
-    prompt = f"""
-Du bist ein Englischlehrer für deutsche Lernende.
-Prüfe, ob die englische Vokabel ein Verb ist. Falls ja, erstelle Verbformen und wichtige Zeitformen.
-
-Deutsch: {word_de}
-Englisch: {word_en}
-Kategorie: {category}
-Schwierigkeit: {level}
-Variante: {variant}
-
-Regeln:
-- Falls die englische Vokabel kein Verb ist, gib "is_verb": false zurück.
-- Falls es ein Verb ist, gib "is_verb": true zurück.
-- Nutze korrektes Standardenglisch.
-- Gib die Formen knapp und eindeutig aus.
-- "you_plural" steht für "you" im Plural.
-- Gib eine kurze deutsche Notiz, insbesondere bei unregelmäßigen Verben oder Verben mit Präposition.
-- Antworte ausschließlich als valides JSON ohne Markdown.
-
-JSON-Format:
-{{
-  "is_verb": true,
-  "infinitive": "to ...",
-  "base_form": "...",
-  "third_person_singular": "...",
-  "past_simple": "...",
-  "past_participle": "...",
-  "ing_form": "...",
-  "regularity": "regular|irregular|mixed|not_applicable",
-  "note_de": "...",
-  "tenses": {{
-    "present_simple": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "present_continuous": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "past_simple": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "past_continuous": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "present_perfect": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "past_perfect": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "future_simple": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "conditional": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}}
-  }},
-  "example_sentences": [
-    {{"tense": "present_simple", "en": "...", "de": "..."}},
-    {{"tense": "past_simple", "en": "...", "de": "..."}},
-    {{"tense": "present_perfect", "en": "...", "de": "..."}}
-  ]
-}}
-"""
-    try:
-        response = client.responses.create(model=get_openai_model(), input=prompt)
-        data = extract_json(response.output_text)
-        if not isinstance(data, dict):
-            raise ValueError("Die KI-Antwort war kein JSON-Objekt.")
-        return {"ok": True, "error": "", "data": data}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "data": {}}
-
-
-def parse_verb_forms_json(value):
-    """Liest gespeicherte Verbformen aus einer JSON-Spalte."""
-    if value is None or pd.isna(value) or not str(value).strip():
-        return None
-    try:
-        data = json.loads(str(value))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def render_verb_forms(verb_data: dict):
-    """Stellt Verbformen übersichtlich in Streamlit dar."""
-    if not verb_data:
-        return
-
-    if not verb_data.get("is_verb", False):
-        st.info("Diese Vokabel wurde von der KI nicht als Verb erkannt.")
-        note = str(verb_data.get("note_de", "")).strip()
-        if note:
-            st.caption(note)
-        return
-
-    note = str(verb_data.get("note_de", "")).strip()
-    if note:
-        st.info(note)
-
-    basis_df = pd.DataFrame([
-        {"Form": "Infinitive", "Wert": verb_data.get("infinitive", "")},
-        {"Form": "Base form", "Wert": verb_data.get("base_form", "")},
-        {"Form": "3rd person singular", "Wert": verb_data.get("third_person_singular", "")},
-        {"Form": "Past simple", "Wert": verb_data.get("past_simple", "")},
-        {"Form": "Past participle", "Wert": verb_data.get("past_participle", "")},
-        {"Form": "-ing form", "Wert": verb_data.get("ing_form", "")},
-        {"Form": "Regularity", "Wert": verb_data.get("regularity", "")},
-    ])
-    st.markdown("#### Basisformen")
-    st.dataframe(basis_df, use_container_width=True, hide_index=True)
-
-    tenses = verb_data.get("tenses", {})
-    if isinstance(tenses, dict) and tenses:
-        st.markdown("#### Zeitformen")
-        tense_labels = {
-            "present_simple": "Present Simple",
-            "present_continuous": "Present Continuous",
-            "past_simple": "Past Simple",
-            "past_continuous": "Past Continuous",
-            "present_perfect": "Present Perfect",
-            "past_perfect": "Past Perfect",
-            "future_simple": "Future Simple",
-            "conditional": "Conditional",
-        }
-
-        tabs = st.tabs([tense_labels.get(k, str(k).replace("_", " ").title()) for k in tenses.keys()])
-        for tab, (tense_key, forms) in zip(tabs, tenses.items()):
-            with tab:
-                if isinstance(forms, dict):
-                    tense_df = pd.DataFrame(
-                        [{"Person": person, "Form": form} for person, form in forms.items()]
-                    )
-                    st.dataframe(tense_df, use_container_width=True, hide_index=True)
-
-    examples = verb_data.get("example_sentences", [])
-    if isinstance(examples, list) and examples:
-        st.markdown("#### Beispielsätze zu Zeitformen")
-        ex_rows = []
-        for ex in examples:
-            if isinstance(ex, dict):
-                ex_rows.append({
-                    "Zeitform": str(ex.get("tense", "")).replace("_", " ").title(),
-                    "Englisch": ex.get("en", ""),
-                    "Deutsch": ex.get("de", ""),
-                })
-        if ex_rows:
-            st.dataframe(pd.DataFrame(ex_rows), use_container_width=True, hide_index=True)
-
-
-
-
-
 def generate_ai_vocabulary(topic: str, count: int, category: str, level: str = "mittel", include_examples: bool = True, variant: int = 0):
     """Erzeugt neue Vokabelvorschläge zu einem frei vorgegebenen Themenbereich."""
     api_key = get_openai_api_key()
@@ -1193,12 +851,6 @@ st.markdown("""
 
 # Daten laden
 df = load_data()
-learning_history = load_history()
-
-try:
-    daily_goal_default = int(get_setting_value("daily_goal", "20"))
-except Exception:
-    daily_goal_default = 20
 
 if df.empty:
     st.warning("Deine Vokabelliste enthält noch keine Vokabeln. Öffne den Admin-Bereich und lege die erste Vokabel an.")
@@ -1212,7 +864,6 @@ st.session_state.setdefault("antwort_hinweis", "")
 st.session_state.setdefault("reset_antwort", False)
 st.session_state.setdefault("last_ai_examples", [])
 st.session_state.setdefault("last_ai_synonyms", None)
-st.session_state.setdefault("last_ai_verbforms", None)
 st.session_state.setdefault("last_ai_cloze", None)
 st.session_state.setdefault("cloze_refresh", 0)
 st.session_state.setdefault("last_generated_vocabulary", [])
@@ -1255,12 +906,9 @@ with tab_home:
         accuracy = (total_correct / max(total_answers, 1)) * 100
         trained_words = int((home["Total"] > 0).sum())
 
-        history_stats = history_summary(learning_history, daily_goal_default)
-        trained_today = history_stats["today_words"]
-        answers_today = history_stats["today_answers"]
-        correct_today = history_stats["today_correct"]
-        streak_days = history_stats["streak"]
-        goal_progress = history_stats["goal_progress"]
+        last_train = pd.to_datetime(home["Zuletzt_geuebt"], errors="coerce") if "Zuletzt_geuebt" in home.columns else pd.Series([], dtype="datetime64[ns]")
+        today = pd.Timestamp.today().normalize()
+        trained_today = int((last_train.dt.normalize() == today).sum()) if len(last_train) else 0
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -1268,25 +916,10 @@ with tab_home:
         with c2:
             st.markdown(f"""<div class='home-card'><h3>✅ Trefferquote</h3><div class='big'>{accuracy:.0f}%</div><div class='small'>{total_answers} Antworten gesamt</div></div>""", unsafe_allow_html=True)
         with c3:
-            st.markdown(f"""<div class='home-card'><h3>🔥 Heute</h3><div class='big'>{answers_today}</div><div class='small'>{trained_today} unterschiedliche Vokabeln</div></div>""", unsafe_allow_html=True)
+            st.markdown(f"""<div class='home-card'><h3>🔥 Heute</h3><div class='big'>{trained_today}</div><div class='small'>Vokabeln heute geübt</div></div>""", unsafe_allow_html=True)
         with c4:
-            st.markdown(f"""<div class='home-card'><h3>🔥 Streak</h3><div class='big'>{streak_days}</div><div class='small'>Tage in Folge gelernt</div></div>""", unsafe_allow_html=True)
-
-        st.markdown("---")
-        goal_col1, goal_col2 = st.columns([1, 2])
-        with goal_col1:
-            new_daily_goal = st.number_input("🎯 Tagesziel Antworten", min_value=1, max_value=200, value=int(daily_goal_default), step=1)
-            if st.button("Tagesziel speichern"):
-                set_setting_value("daily_goal", str(int(new_daily_goal)))
-                st.success("Tagesziel gespeichert.")
-                st.rerun()
-        with goal_col2:
-            st.markdown(f"**Fortschritt heute:** {answers_today} / {daily_goal_default} Antworten")
-            st.progress(goal_progress)
-            today_accuracy = (correct_today / max(answers_today, 1)) * 100
-            st.caption(f"Heute richtig: {correct_today} von {answers_today} ({today_accuracy:.0f} %) · Streak: {streak_days} Tage")
-
-        difficult_count = int(((home["Falsch"] > home["Richtig"]) & (home["Total"] > 0)).sum())
+            difficult_count = int(((home["Falsch"] > home["Richtig"]) & (home["Total"] > 0)).sum())
+            st.markdown(f"""<div class='home-card'><h3>🎯 Lernfokus</h3><div class='big'>{difficult_count}</div><div class='small'>Wörter mit Nachholbedarf</div></div>""", unsafe_allow_html=True)
 
         st.markdown("---")
         left, right = st.columns([1.2, 1])
@@ -1320,17 +953,6 @@ with tab_home:
 """,
                 unsafe_allow_html=True,
             )
-
-        st.markdown("---")
-        st.markdown("### 🧾 Lernhistorie zuletzt")
-        if learning_history.empty:
-            st.info("Noch keine Lernhistorie vorhanden. Sobald du trainierst oder Tests machst, wird hier automatisch protokolliert.")
-        else:
-            hist_recent = learning_history.tail(10).copy()
-            if "Korrekt" in hist_recent.columns:
-                hist_recent["Ergebnis"] = hist_recent["Korrekt"].astype(str).str.lower().map(lambda x: "✅" if x in ["true", "1", "ja", "yes"] else "❌")
-            cols = [c for c in ["Zeitstempel", "Ergebnis", "Deutsch", "Englisch", "Kategorie", "Modus", "Antwort"] if c in hist_recent.columns]
-            st.dataframe(hist_recent[cols].iloc[::-1], use_container_width=True, hide_index=True)
 
         st.markdown("---")
         st.markdown("### 📊 Kategorienüberblick")
@@ -1510,17 +1132,6 @@ with tab_training:
                 df.at[idx, "Falsch"] = int(df.at[idx, "Falsch"]) + 1
             df.at[idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             save_data(df)
-            append_learning_event(
-                word_id=st.session_state.current_word_id,
-                deutsch=vokabel_de,
-                englisch=vokabel_en,
-                kategorie=selected_category,
-                modus=mode,
-                antwort=user_input,
-                erwartete_antwort=expected_answer,
-                korrekt=correct,
-                hinweis=reason,
-            )
 
     st.text_input(input_label, key="antwort", on_change=check_training_answer)
 
@@ -1629,65 +1240,6 @@ with tab_training:
                         save_data(df)
                         st.success("Synonyme wurden zusätzlich zu Alternative_Antworten hinzugefügt.")
                         st.rerun()
-
-    # Verbformen & Zeitformen
-    st.markdown("---")
-    st.markdown("### 🔤 Verbformen & Zeitformen")
-    st.caption("Für englische Verben kannst du Basisformen, Konjugationen und wichtige Zeitformen per KI erzeugen und in Google Sheets speichern.")
-
-    saved_verb_data = parse_verb_forms_json(row.get("Verbformen_JSON", ""))
-    if saved_verb_data:
-        with st.expander("📌 Gespeicherte Verbformen anzeigen", expanded=False):
-            render_verb_forms(saved_verb_data)
-
-    vf_col1, vf_col2, vf_col3 = st.columns([1, 1, 2])
-    with vf_col1:
-        generate_verb_clicked = st.button("🤖 Verbformen erzeugen", use_container_width=True, key=f"generate_verbforms_{st.session_state.current_word_id}")
-    with vf_col2:
-        clear_verb_clicked = st.button("🧹 Anzeige leeren", use_container_width=True, key=f"clear_verbforms_{st.session_state.current_word_id}")
-    with vf_col3:
-        st.caption("Tipp: Besonders hilfreich bei unregelmäßigen Verben wie go/went/gone oder Verben mit Präpositionen.")
-
-    if clear_verb_clicked:
-        st.session_state.last_ai_verbforms = None
-        st.rerun()
-
-    if generate_verb_clicked:
-        with st.spinner("KI erzeugt Verbformen und Zeitformen ..."):
-            vf_result = generate_ai_verb_forms(
-                word_de=vokabel_de,
-                word_en=vokabel_en,
-                category=selected_category,
-                level=level_default,
-                variant=st.session_state.ai_refresh,
-            )
-        st.session_state.ai_refresh += 1
-        if vf_result["ok"]:
-            st.session_state.last_ai_verbforms = {
-                "word_id": st.session_state.current_word_id,
-                "data": vf_result["data"],
-            }
-        else:
-            st.warning(f"Verbformen konnten nicht erzeugt werden: {vf_result['error']}")
-
-    vf_state = st.session_state.last_ai_verbforms
-    if vf_state and vf_state.get("word_id") == st.session_state.current_word_id:
-        verb_data = vf_state.get("data", {})
-        with st.container(border=True):
-            st.markdown("**KI-Vorschlag für diese Vokabel**")
-            render_verb_forms(verb_data)
-
-            if st.button("💾 Verbformen speichern", use_container_width=True, key=f"save_verbforms_{st.session_state.current_word_id}"):
-                idx = find_row_index(df, st.session_state.current_word_id)
-                if idx is not None:
-                    df.at[idx, "Wortart"] = "verb" if verb_data.get("is_verb", False) else "kein Verb"
-                    df.at[idx, "Verbformen_JSON"] = json.dumps(verb_data, ensure_ascii=False)
-                    df.at[idx, "Verbformen_Notiz"] = str(verb_data.get("note_de", "")).strip()
-                    save_data(df)
-                    st.success("Verbformen wurden in Google Sheets gespeichert.")
-                    st.rerun()
-                else:
-                    st.error("Vokabel konnte nicht in der Tabelle gefunden werden.")
 
     # KI-Beispielsätze
     st.markdown("---")
@@ -1856,17 +1408,6 @@ with tab_test:
                         df.at[real_idx, "Falsch"] = int(df.at[real_idx, "Falsch"]) + 1
                     df.at[real_idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     save_data(df)
-                    append_learning_event(
-                        word_id=str(row_t["ID"]),
-                        deutsch=str(row_t["Deutsch"]),
-                        englisch=str(row_t["Englisch"]),
-                        kategorie=str(row_t.get("Kategorie", "")),
-                        modus=f"Test: {current_test_direction}",
-                        antwort=user_input,
-                        erwartete_antwort=expected_test_answer,
-                        korrekt=correct,
-                        hinweis=reason,
-                    )
                 st.session_state.test_index += 1
                 st.rerun()
         else:
@@ -1901,43 +1442,6 @@ with tab_dashboard:
     m2.metric("Antworten gesamt", total_answers)
     m3.metric("Richtig", total_richtig)
     m4.metric("Trefferquote", f"{(total_richtig / max(total_answers, 1)) * 100:.0f}%")
-
-    st.markdown("### Lernaktivität")
-    if learning_history.empty:
-        st.info("Noch keine Lernhistorie vorhanden.")
-    else:
-        hist_dash = learning_history.copy()
-        hist_dash["Datum_dt"] = pd.to_datetime(hist_dash.get("Datum", ""), errors="coerce")
-        hist_dash = hist_dash.dropna(subset=["Datum_dt"])
-        if hist_dash.empty:
-            st.info("Noch keine auswertbaren Historien-Daten vorhanden.")
-        else:
-            hist_dash["Korrekt_bool"] = hist_dash.get("Korrekt", "").astype(str).str.lower().isin(["true", "1", "ja", "yes"])
-            daily = hist_dash.groupby(hist_dash["Datum_dt"].dt.date).agg(
-                Antworten=("ID", "count"),
-                Vokabeln=("ID", "nunique"),
-                Richtig=("Korrekt_bool", "sum"),
-            ).reset_index().rename(columns={"Datum_dt": "Datum"})
-            daily["Datum"] = pd.to_datetime(daily["Datum"])
-            daily = daily.sort_values("Datum").tail(30)
-            fig_hist = px.bar(
-                daily,
-                x="Datum",
-                y="Antworten",
-                hover_data={"Vokabeln": True, "Richtig": True, "Datum": "|%d.%m.%Y"},
-                title="Antworten pro Tag",
-            )
-            fig_hist.update_traces(marker_color="#35D3DF", marker_line_width=0, opacity=0.9)
-            fig_hist.update_layout(
-                height=330,
-                margin=dict(l=10, r=20, t=60, b=20),
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                showlegend=False,
-                xaxis_title="",
-                yaxis_title="Antworten",
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
 
     st.markdown("### Schwierigste Vokabeln")
     difficult = work.sort_values(["Falsch", "Total"], ascending=False).head(20)
@@ -2043,7 +1547,7 @@ with tab_admin:
                 else:
                     new_id = get_next_numeric_id(df)
 
-                    new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}
+                    new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}
                     new_row.update({
                         "ID": new_id,
                         "Deutsch": new_de.strip(),
@@ -2182,7 +1686,7 @@ with tab_generator:
                             skipped_duplicates.append(f"{de} / {en}")
                             continue
 
-                        new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}
+                        new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}
                         new_row.update({
                             "ID": build_new_word_id(df, len(rows_to_add) + 1),
                             "Deutsch": de,
@@ -2272,5 +1776,4 @@ gtts
 openai
 gspread
 google-auth
-plotly
 """, language="text")
