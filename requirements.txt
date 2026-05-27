@@ -4,3 +4,5 @@ matplotlib
 openpyxl
 gtts
 openai
+gspread
+google-auth

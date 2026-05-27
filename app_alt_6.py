@@ -14,9 +14,6 @@ import pandas as pd
 import streamlit as st
 from gtts import gTTS
 from openai import OpenAI
-import gspread
-from google.oauth2.service_account import Credentials
-from gspread.exceptions import WorksheetNotFound
 
 # ============================================================
 # Konfiguration
@@ -55,13 +52,13 @@ SYNONYM_COLUMNS = {
 }
 
 # ============================================================
-# Hilfsfunktionen: Google Sheets / Daten
+# Hilfsfunktionen: Datei / Daten
 # ============================================================
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+def ensure_excel_exists() -> None:
+    if not os.path.exists(EXCEL_PATH):
+        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()))
+        df.to_excel(EXCEL_PATH, index=False)
 
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -88,115 +85,22 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_google_sheet_id() -> str | None:
-    try:
-        if "GOOGLE_SHEET_ID" in st.secrets:
-            return str(st.secrets["GOOGLE_SHEET_ID"]).strip()
-    except Exception:
-        pass
-    return os.getenv("GOOGLE_SHEET_ID")
-
-
-def get_google_sheet_name() -> str:
-    try:
-        if "GOOGLE_SHEET_NAME" in st.secrets:
-            return str(st.secrets["GOOGLE_SHEET_NAME"]).strip() or "Vokabeln"
-    except Exception:
-        pass
-    return os.getenv("GOOGLE_SHEET_NAME", "Vokabeln")
-
-
-def get_google_credentials_dict() -> dict | None:
-    try:
-        if "gcp_service_account" in st.secrets:
-            creds = dict(st.secrets["gcp_service_account"])
-            if "private_key" in creds:
-                # Streamlit Secrets speichern Zeilenumbrüche oft als \n.
-                creds["private_key"] = str(creds["private_key"]).replace("\\n", "\n")
-            return creds
-    except Exception:
-        pass
-    return None
-
-
-def google_sheets_configured() -> bool:
-    return bool(get_google_sheet_id() and get_google_credentials_dict())
-
-
-def get_google_client():
-    creds_dict = get_google_credentials_dict()
-    if not creds_dict:
-        raise RuntimeError("Google-Service-Account fehlt in Streamlit Secrets unter [gcp_service_account].")
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
-
-
-def get_vocab_worksheet():
-    sheet_id = get_google_sheet_id()
-    if not sheet_id:
-        raise RuntimeError("GOOGLE_SHEET_ID fehlt in Streamlit Secrets.")
-
-    sheet_name = get_google_sheet_name()
-    gc = get_google_client()
-    sh = gc.open_by_key(sheet_id)
-
-    try:
-        return sh.worksheet(sheet_name)
-    except WorksheetNotFound:
-        # Falls der Tab fehlt, automatisch anlegen.
-        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=50)
-        empty_df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
-        values = [empty_df.columns.tolist()]
-        ws.update(values)
-        return ws
-
-
-def ensure_excel_exists() -> None:
-    """Nur noch als lokaler Fallback, falls Google Sheets nicht konfiguriert ist."""
-    if not os.path.exists(EXCEL_PATH):
-        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()))
-        df.to_excel(EXCEL_PATH, index=False)
-
-
 @st.cache_data(show_spinner=False)
-def load_data_cached(source_key: str) -> pd.DataFrame:
-    """Lädt Vokabeln aus Google Sheets. Falls nicht konfiguriert: lokaler Excel-Fallback."""
-    if google_sheets_configured():
-        ws = get_vocab_worksheet()
-        records = ws.get_all_records()
-        df = pd.DataFrame(records)
-        if df.empty:
-            df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
-        return ensure_columns(df)
-
-    # Fallback für lokale Tests ohne Google Secrets
+def load_data_cached(file_mtime: float) -> pd.DataFrame:
     ensure_excel_exists()
     df = pd.read_excel(EXCEL_PATH)
     return ensure_columns(df)
 
 
 def load_data() -> pd.DataFrame:
-    if google_sheets_configured():
-        source_key = f"gsheets:{get_google_sheet_id()}:{get_google_sheet_name()}"
-    else:
-        ensure_excel_exists()
-        source_key = f"excel:{os.path.getmtime(EXCEL_PATH)}"
-    return load_data_cached(source_key).copy()
+    ensure_excel_exists()
+    mtime = os.path.getmtime(EXCEL_PATH)
+    return load_data_cached(mtime).copy()
 
 
 def save_data(df: pd.DataFrame) -> None:
-    df = ensure_columns(df.copy()).fillna("")
-
-    if google_sheets_configured():
-        ws = get_vocab_worksheet()
-        values = [df.columns.tolist()] + df.astype(str).values.tolist()
-        ws.clear()
-        ws.update(values)
-    else:
-        # Fallback nur für lokale Tests. In Streamlit Cloud bitte Google Sheets verwenden.
-        ensure_excel_exists()
-        df.to_excel(EXCEL_PATH, index=False)
-
+    df = ensure_columns(df.copy())
+    df.to_excel(EXCEL_PATH, index=False)
     st.cache_data.clear()
 
 
@@ -611,13 +515,13 @@ def create_cloze_sentence(sentence: str, word_en: str) -> str:
 # ============================================================
 st.set_page_config(page_title="Vokabeltrainer", page_icon="📘", layout="wide")
 st.title("📘 Intelligenter Vokabeltrainer")
-st.caption("Mit KI-Beispielsätzen, Lernpriorisierung, Tests, Dashboard, Admin-Bereich und Google-Sheets-Speicherung")
+st.caption("Mit KI-Beispielsätzen, Lernpriorisierung, Tests, Dashboard und Admin-Bereich")
 
 # Daten laden
 df = load_data()
 
 if df.empty:
-    st.warning("Deine Vokabelliste enthält noch keine Vokabeln. Öffne den Admin-Bereich und lege die erste Vokabel an.")
+    st.warning("Deine Excel-Datei enthält noch keine Vokabeln. Öffne den Admin-Bereich und lege die erste Vokabel an.")
 
 # Session State
 st.session_state.setdefault("session_seen_ids", set())
@@ -806,7 +710,7 @@ with tab_training:
     # Synonyme
     st.markdown("---")
     st.markdown("### 🔎 Synonyme")
-    st.caption("Synonyme können angezeigt, per KI erzeugt und in Google Sheets gespeichert werden. Englisch-Synonyme werden zusätzlich als erlaubte Antworten gewertet.")
+    st.caption("Synonyme können angezeigt, per KI erzeugt und in deiner Excel-Datei gespeichert werden. Englisch-Synonyme werden zusätzlich als erlaubte Antworten gewertet.")
 
     syn_col1, syn_col2, syn_col3 = st.columns([1, 1, 1])
     with syn_col1:
@@ -1135,14 +1039,14 @@ with tab_admin:
                     st.rerun()
 
     st.markdown("### Daten bearbeiten")
-    st.caption("Änderungen in dieser Tabelle werden nach Klick auf 'Änderungen speichern' in Google Sheets gespeichert.")
+    st.caption("Änderungen in dieser Tabelle werden nach Klick auf 'Änderungen speichern' in die Excel-Datei geschrieben.")
     edited = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="data_editor")
     if st.button("💾 Änderungen speichern"):
         save_data(edited)
-        st.success("Google Sheet aktualisiert.")
+        st.success("Excel-Datei aktualisiert.")
         st.rerun()
 
-    with st.expander("⬇️ Vokabelliste als Excel herunterladen"):
+    with st.expander("⬇️ Excel-Datei herunterladen"):
         buffer = BytesIO()
         ensure_columns(edited.copy()).to_excel(buffer, index=False)
         buffer.seek(0)
@@ -1161,7 +1065,7 @@ with tab_generator:
     st.header("➕ KI-Vokabelgenerator")
     st.caption(
         "Erzeuge neue Vokabelpakete zu einem Themenbereich. "
-        "Die Vorschläge werden zuerst angezeigt und erst nach deiner Bestätigung in Google Sheets gespeichert."
+        "Die Vorschläge werden zuerst angezeigt und erst nach deiner Bestätigung in die Excel-Datei gespeichert."
     )
 
     with st.form("vocab_generator_form"):
@@ -1268,7 +1172,7 @@ with tab_generator:
                     if rows_to_add:
                         df_new = pd.concat([df, pd.DataFrame(rows_to_add)], ignore_index=True)
                         save_data(df_new)
-                        st.success(f"{len(rows_to_add)} neue Vokabeln wurden in Google Sheets gespeichert.")
+                        st.success(f"{len(rows_to_add)} neue Vokabeln wurden in der Excel-Datei gespeichert.")
                         if skipped_duplicates:
                             st.info("Übersprungene Duplikate: " + "; ".join(skipped_duplicates[:10]))
                         st.session_state.last_generated_vocabulary = []
@@ -1280,7 +1184,7 @@ with tab_generator:
                 st.session_state.last_generated_vocabulary = []
                 st.rerun()
         with save_col3:
-            st.info("Gespeichert wird dauerhaft in Google Sheets, sofern deine Google-Secrets korrekt gesetzt sind.")
+            st.info("Gespeichert wird lokal in `vokabeln.xlsx`. In Streamlit Cloud ist Excel-Speicherung nicht dauerhaft GitHub-synchron.")
 
 # ============================================================
 # Einstellungen
@@ -1293,35 +1197,15 @@ with tab_settings:
     st.write("Aktuelles Modell:", get_openai_model())
 
     st.info(
-        "Für Streamlit Cloud den OpenAI-Key und die Google-Sheets-Zugangsdaten unter App settings → Secrets eintragen. "
-        "Der Google-Sheet-Tab sollte z. B. `Vokabeln` heißen."
+        "Für Streamlit Cloud den Key unter App settings → Secrets eintragen:\n\n"
+        'OPENAI_API_KEY = "sk-..."\n'
+        f'OPENAI_MODEL = "{DEFAULT_MODEL}"'
     )
-
-    st.markdown("### Google Sheets Speicher")
-    st.write("Google Sheets konfiguriert:", "✅ ja" if google_sheets_configured() else "❌ nein")
-    st.write("Sheet-Name:", get_google_sheet_name())
-    st.code("""OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-4.1-mini"
-
-GOOGLE_SHEET_ID = "deine_sheet_id"
-GOOGLE_SHEET_NAME = "Vokabeln"
-
-[gcp_service_account]
-type = "service_account"
-project_id = "..."
-private_key_id = "..."
-private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-client_email = "...iam.gserviceaccount.com"
-client_id = "..."
-auth_uri = "https://accounts.google.com/o/oauth2/auth"
-token_uri = "https://oauth2.googleapis.com/token"
-auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-client_x509_cert_url = "...""", language="toml")
 
     st.markdown("### Kostenkontrolle")
     st.write(
         "Die App generiert KI-Beispielsätze standardmäßig nur auf Knopfdruck. "
-        "So vermeidest du unnötige API-Anfragen durch Streamlit-Reruns. Die Vokabeldaten werden dauerhaft in Google Sheets gespeichert."
+        "So vermeidest du unnötige API-Anfragen durch Streamlit-Reruns."
     )
 
     st.markdown("### Benötigte requirements.txt")
@@ -1331,6 +1215,4 @@ openpyxl
 matplotlib
 gtts
 openai
-gspread
-google-auth
 """, language="text")
