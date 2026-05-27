@@ -222,8 +222,39 @@ def load_data_cached(source_key: str) -> pd.DataFrame:
     """Lädt Vokabeln aus Google Sheets. Falls nicht konfiguriert: lokaler Excel-Fallback."""
     if google_sheets_configured():
         ws = get_vocab_worksheet()
-        records = ws.get_all_records()
-        df = pd.DataFrame(records)
+        values = ws.get_all_values()
+
+        if not values:
+            df = pd.DataFrame()
+        else:
+            headers = values[0]
+            rows = values[1:]
+
+            # Leere Spaltenüberschriften automatisch benennen
+            clean_headers = []
+            seen = {}
+
+            for i, header in enumerate(headers):
+                name = str(header).strip()
+
+                if name == "":
+                    name = f"Unbenannt_{i+1}"
+
+                # Doppelte Spaltennamen eindeutig machen
+                if name in seen:
+                    seen[name] += 1
+                    name = f"{name}_{seen[name]}"
+                else:
+                    seen[name] = 1
+
+                clean_headers.append(name)
+
+            df = pd.DataFrame(rows, columns=clean_headers)
+
+            # Komplett leere Zeilen entfernen
+            df = df.dropna(how="all")
+            df = df[~(df.astype(str).apply(lambda row: "".join(row).strip(), axis=1) == "")]
+            
         if df.empty:
             df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
         return ensure_columns(df)
