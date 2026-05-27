@@ -1086,44 +1086,15 @@ with tab_dashboard:
     st.dataframe(difficult[["Deutsch", "Englisch", "Kategorie", "Richtig", "Falsch", "Zuletzt_geuebt"]], use_container_width=True)
 
     st.markdown("### Trefferquote je Kategorie")
-
     cat = work.groupby("Kategorie", dropna=False)[["Richtig", "Falsch"]].sum().reset_index()
-    cat["Gesamt"] = cat["Richtig"] + cat["Falsch"]
-    cat["Trefferquote"] = cat["Richtig"] / cat["Gesamt"].replace(0, pd.NA)
+    cat["Trefferquote"] = cat["Richtig"] / (cat["Richtig"] + cat["Falsch"]).replace(0, pd.NA)
+    st.dataframe(cat, use_container_width=True)
 
-    # Für die Tabelle zeigen wir weiterhin alle Kategorien an.
-    cat_display = cat.copy()
-    cat_display["Trefferquote_%"] = (cat_display["Trefferquote"].fillna(0) * 100).round(1)
-    st.dataframe(
-        cat_display[["Kategorie", "Richtig", "Falsch", "Gesamt", "Trefferquote_%"]],
-        use_container_width=True,
-    )
-
-    # Für das Diagramm nur Kategorien mit mindestens einer Antwort anzeigen.
-    # Das verhindert eine leere 0%-Grafik mit vielen unlesbaren X-Achsen-Labels.
-    cat_chart = cat[cat["Gesamt"] > 0].copy()
-
-    if cat_chart.empty:
-        st.info("Noch keine Kategorie mit beantworteten Vokabeln vorhanden. Das Diagramm erscheint, sobald du Antworten gespeichert hast.")
-    else:
-        cat_chart["Kategorie"] = cat_chart["Kategorie"].astype(str).replace("", "Ohne Kategorie")
-        cat_chart["Trefferquote_%"] = cat_chart["Trefferquote"].fillna(0) * 100
-        cat_chart = cat_chart.sort_values("Trefferquote_%", ascending=True)
-
-        fig_height = max(4, len(cat_chart) * 0.38)
-        fig, ax = plt.subplots(figsize=(10, fig_height))
-        ax.barh(cat_chart["Kategorie"], cat_chart["Trefferquote_%"])
-
-        ax.set_xlabel("Trefferquote %")
-        ax.set_ylabel("")
-        ax.set_xlim(0, 100)
-        ax.set_title("Trefferquote je Kategorie")
-
-        for i, value in enumerate(cat_chart["Trefferquote_%"]):
-            label_x = min(value + 1, 98)
-            ax.text(label_x, i, f"{value:.0f}%", va="center")
-
-        plt.tight_layout()
+    if not cat.empty:
+        fig, ax = plt.subplots(figsize=(7, 3))
+        ax.bar(cat["Kategorie"].astype(str), cat["Trefferquote"].fillna(0) * 100)
+        ax.set_ylabel("Trefferquote %")
+        ax.tick_params(axis="x", rotation=45)
         st.pyplot(fig)
 
 # ============================================================
