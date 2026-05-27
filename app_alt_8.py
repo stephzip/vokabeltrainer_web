@@ -51,12 +51,6 @@ SYNONYM_COLUMNS = {
     "Synonym_Notiz": "",
 }
 
-VERB_COLUMNS = {
-    "Wortart": "",
-    "Verbformen_JSON": "",
-    "Verbformen_Notiz": "",
-}
-
 # ------------------------------------------------------------
 # 🔐 Passwortschutz
 # ------------------------------------------------------------
@@ -115,7 +109,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Stellt sicher, dass alle benötigten Spalten existieren."""
     df = df.copy()
 
-    for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}.items():
+    for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.items():
         if col not in df.columns:
             df[col] = default
 
@@ -214,7 +208,7 @@ def get_vocab_worksheet():
     except WorksheetNotFound:
         # Falls der Tab fehlt, automatisch anlegen.
         ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=50)
-        empty_df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}.keys()))
+        empty_df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
         values = [empty_df.columns.tolist()]
         ws.update(values)
         return ws
@@ -223,7 +217,7 @@ def get_vocab_worksheet():
 def ensure_excel_exists() -> None:
     """Nur noch als lokaler Fallback, falls Google Sheets nicht konfiguriert ist."""
     if not os.path.exists(EXCEL_PATH):
-        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()) + list(VERB_COLUMNS.keys()))
+        df = pd.DataFrame(columns=list(BASE_COLUMNS.keys()) + list(KI_COLUMNS.keys()) + list(SYNONYM_COLUMNS.keys()))
         df.to_excel(EXCEL_PATH, index=False)
 
 
@@ -266,7 +260,7 @@ def load_data_cached(source_key: str) -> pd.DataFrame:
             df = df[~(df.astype(str).apply(lambda row: "".join(row).strip(), axis=1) == "")]
 
         if df.empty:
-            df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}.keys()))
+            df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
         return ensure_columns(df)
 
     # Fallback für lokale Tests ohne Google Secrets
@@ -583,149 +577,6 @@ JSON-Format:
 
 
 
-
-def generate_ai_verb_forms(word_de: str, word_en: str, category: str, level: str = "mittel", variant: int = 0):
-    """Erzeugt Verbformen und Zeitformen für englische Verben."""
-    api_key = get_openai_api_key()
-    if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY fehlt.", "data": {}}
-
-    client = OpenAI(api_key=api_key)
-    prompt = f"""
-Du bist ein Englischlehrer für deutsche Lernende.
-Prüfe, ob die englische Vokabel ein Verb ist. Falls ja, erstelle Verbformen und wichtige Zeitformen.
-
-Deutsch: {word_de}
-Englisch: {word_en}
-Kategorie: {category}
-Schwierigkeit: {level}
-Variante: {variant}
-
-Regeln:
-- Falls die englische Vokabel kein Verb ist, gib "is_verb": false zurück.
-- Falls es ein Verb ist, gib "is_verb": true zurück.
-- Nutze korrektes Standardenglisch.
-- Gib die Formen knapp und eindeutig aus.
-- "you_plural" steht für "you" im Plural.
-- Gib eine kurze deutsche Notiz, insbesondere bei unregelmäßigen Verben oder Verben mit Präposition.
-- Antworte ausschließlich als valides JSON ohne Markdown.
-
-JSON-Format:
-{{
-  "is_verb": true,
-  "infinitive": "to ...",
-  "base_form": "...",
-  "third_person_singular": "...",
-  "past_simple": "...",
-  "past_participle": "...",
-  "ing_form": "...",
-  "regularity": "regular|irregular|mixed|not_applicable",
-  "note_de": "...",
-  "tenses": {{
-    "present_simple": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "present_continuous": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "past_simple": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "past_continuous": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "present_perfect": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "past_perfect": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "future_simple": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}},
-    "conditional": {{"I": "...", "you": "...", "he/she/it": "...", "we": "...", "you_plural": "...", "they": "..."}}
-  }},
-  "example_sentences": [
-    {{"tense": "present_simple", "en": "...", "de": "..."}},
-    {{"tense": "past_simple", "en": "...", "de": "..."}},
-    {{"tense": "present_perfect", "en": "...", "de": "..."}}
-  ]
-}}
-"""
-    try:
-        response = client.responses.create(model=get_openai_model(), input=prompt)
-        data = extract_json(response.output_text)
-        if not isinstance(data, dict):
-            raise ValueError("Die KI-Antwort war kein JSON-Objekt.")
-        return {"ok": True, "error": "", "data": data}
-    except Exception as e:
-        return {"ok": False, "error": str(e), "data": {}}
-
-
-def parse_verb_forms_json(value):
-    """Liest gespeicherte Verbformen aus einer JSON-Spalte."""
-    if value is None or pd.isna(value) or not str(value).strip():
-        return None
-    try:
-        data = json.loads(str(value))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
-
-
-def render_verb_forms(verb_data: dict):
-    """Stellt Verbformen übersichtlich in Streamlit dar."""
-    if not verb_data:
-        return
-
-    if not verb_data.get("is_verb", False):
-        st.info("Diese Vokabel wurde von der KI nicht als Verb erkannt.")
-        note = str(verb_data.get("note_de", "")).strip()
-        if note:
-            st.caption(note)
-        return
-
-    note = str(verb_data.get("note_de", "")).strip()
-    if note:
-        st.info(note)
-
-    basis_df = pd.DataFrame([
-        {"Form": "Infinitive", "Wert": verb_data.get("infinitive", "")},
-        {"Form": "Base form", "Wert": verb_data.get("base_form", "")},
-        {"Form": "3rd person singular", "Wert": verb_data.get("third_person_singular", "")},
-        {"Form": "Past simple", "Wert": verb_data.get("past_simple", "")},
-        {"Form": "Past participle", "Wert": verb_data.get("past_participle", "")},
-        {"Form": "-ing form", "Wert": verb_data.get("ing_form", "")},
-        {"Form": "Regularity", "Wert": verb_data.get("regularity", "")},
-    ])
-    st.markdown("#### Basisformen")
-    st.dataframe(basis_df, use_container_width=True, hide_index=True)
-
-    tenses = verb_data.get("tenses", {})
-    if isinstance(tenses, dict) and tenses:
-        st.markdown("#### Zeitformen")
-        tense_labels = {
-            "present_simple": "Present Simple",
-            "present_continuous": "Present Continuous",
-            "past_simple": "Past Simple",
-            "past_continuous": "Past Continuous",
-            "present_perfect": "Present Perfect",
-            "past_perfect": "Past Perfect",
-            "future_simple": "Future Simple",
-            "conditional": "Conditional",
-        }
-
-        tabs = st.tabs([tense_labels.get(k, str(k).replace("_", " ").title()) for k in tenses.keys()])
-        for tab, (tense_key, forms) in zip(tabs, tenses.items()):
-            with tab:
-                if isinstance(forms, dict):
-                    tense_df = pd.DataFrame(
-                        [{"Person": person, "Form": form} for person, form in forms.items()]
-                    )
-                    st.dataframe(tense_df, use_container_width=True, hide_index=True)
-
-    examples = verb_data.get("example_sentences", [])
-    if isinstance(examples, list) and examples:
-        st.markdown("#### Beispielsätze zu Zeitformen")
-        ex_rows = []
-        for ex in examples:
-            if isinstance(ex, dict):
-                ex_rows.append({
-                    "Zeitform": str(ex.get("tense", "")).replace("_", " ").title(),
-                    "Englisch": ex.get("en", ""),
-                    "Deutsch": ex.get("de", ""),
-                })
-        if ex_rows:
-            st.dataframe(pd.DataFrame(ex_rows), use_container_width=True, hide_index=True)
-
-
-
 def generate_ai_vocabulary(topic: str, count: int, category: str, level: str = "mittel", include_examples: bool = True, variant: int = 0):
     """Erzeugt neue Vokabelvorschläge zu einem frei vorgegebenen Themenbereich."""
     api_key = get_openai_api_key()
@@ -928,7 +779,6 @@ st.session_state.setdefault("antwort_hinweis", "")
 st.session_state.setdefault("reset_antwort", False)
 st.session_state.setdefault("last_ai_examples", [])
 st.session_state.setdefault("last_ai_synonyms", None)
-st.session_state.setdefault("last_ai_verbforms", None)
 st.session_state.setdefault("last_generated_vocabulary", [])
 st.session_state.setdefault("vocab_generator_refresh", 0)
 st.session_state.setdefault("ai_refresh", 0)
@@ -999,7 +849,6 @@ with tab_training:
         st.session_state.reset_antwort = True
         st.session_state.last_ai_examples = []
         st.session_state.last_ai_synonyms = None
-        st.session_state.last_ai_verbforms = None
         st.session_state.ai_refresh += 1
         st.session_state.synonym_refresh += 1
 
@@ -1180,65 +1029,6 @@ with tab_training:
                         save_data(df)
                         st.success("Synonyme wurden zusätzlich zu Alternative_Antworten hinzugefügt.")
                         st.rerun()
-
-    # Verbformen & Zeitformen
-    st.markdown("---")
-    st.markdown("### 🔤 Verbformen & Zeitformen")
-    st.caption("Für englische Verben kannst du Basisformen, Konjugationen und wichtige Zeitformen per KI erzeugen und in Google Sheets speichern.")
-
-    saved_verb_data = parse_verb_forms_json(row.get("Verbformen_JSON", ""))
-    if saved_verb_data:
-        with st.expander("📌 Gespeicherte Verbformen anzeigen", expanded=False):
-            render_verb_forms(saved_verb_data)
-
-    vf_col1, vf_col2, vf_col3 = st.columns([1, 1, 2])
-    with vf_col1:
-        generate_verb_clicked = st.button("🤖 Verbformen erzeugen", use_container_width=True, key=f"generate_verbforms_{st.session_state.current_word_id}")
-    with vf_col2:
-        clear_verb_clicked = st.button("🧹 Anzeige leeren", use_container_width=True, key=f"clear_verbforms_{st.session_state.current_word_id}")
-    with vf_col3:
-        st.caption("Tipp: Besonders hilfreich bei unregelmäßigen Verben wie go/went/gone oder Verben mit Präpositionen.")
-
-    if clear_verb_clicked:
-        st.session_state.last_ai_verbforms = None
-        st.rerun()
-
-    if generate_verb_clicked:
-        with st.spinner("KI erzeugt Verbformen und Zeitformen ..."):
-            vf_result = generate_ai_verb_forms(
-                word_de=vokabel_de,
-                word_en=vokabel_en,
-                category=selected_category,
-                level=level_default,
-                variant=st.session_state.ai_refresh,
-            )
-        st.session_state.ai_refresh += 1
-        if vf_result["ok"]:
-            st.session_state.last_ai_verbforms = {
-                "word_id": st.session_state.current_word_id,
-                "data": vf_result["data"],
-            }
-        else:
-            st.warning(f"Verbformen konnten nicht erzeugt werden: {vf_result['error']}")
-
-    vf_state = st.session_state.last_ai_verbforms
-    if vf_state and vf_state.get("word_id") == st.session_state.current_word_id:
-        verb_data = vf_state.get("data", {})
-        with st.container(border=True):
-            st.markdown("**KI-Vorschlag für diese Vokabel**")
-            render_verb_forms(verb_data)
-
-            if st.button("💾 Verbformen speichern", use_container_width=True, key=f"save_verbforms_{st.session_state.current_word_id}"):
-                idx = find_row_index(df, st.session_state.current_word_id)
-                if idx is not None:
-                    df.at[idx, "Wortart"] = "verb" if verb_data.get("is_verb", False) else "kein Verb"
-                    df.at[idx, "Verbformen_JSON"] = json.dumps(verb_data, ensure_ascii=False)
-                    df.at[idx, "Verbformen_Notiz"] = str(verb_data.get("note_de", "")).strip()
-                    save_data(df)
-                    st.success("Verbformen wurden in Google Sheets gespeichert.")
-                    st.rerun()
-                else:
-                    st.error("Vokabel konnte nicht in der Tabelle gefunden werden.")
 
     # KI-Beispielsätze
     st.markdown("---")
@@ -1546,7 +1336,7 @@ with tab_admin:
                 else:
                     new_id = get_next_numeric_id(df)
 
-                    new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}
+                    new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}
                     new_row.update({
                         "ID": new_id,
                         "Deutsch": new_de.strip(),
@@ -1685,7 +1475,7 @@ with tab_generator:
                             skipped_duplicates.append(f"{de} / {en}")
                             continue
 
-                        new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS, **VERB_COLUMNS}
+                        new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}
                         new_row.update({
                             "ID": build_new_word_id(df, len(rows_to_add) + 1),
                             "Deutsch": de,
