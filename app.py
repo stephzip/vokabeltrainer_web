@@ -1,5 +1,3 @@
-# python -m streamlit run app.py
-
 import json
 import os
 import random
@@ -8,7 +6,6 @@ import time
 from datetime import datetime
 from difflib import SequenceMatcher
 from io import BytesIO
-
 import matplotlib.pyplot as plt
 import pandas as pd
 import plotly.express as px
@@ -18,7 +15,6 @@ from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
-
 # ============================================================
 # Konfiguration
 # ============================================================
