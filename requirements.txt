@@ -6,3 +6,4 @@ gtts
 openai
 gspread
 google-auth
+plotly

@@ -11,6 +11,7 @@ from io import BytesIO
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from gtts import gTTS
 from openai import OpenAI
@@ -1099,32 +1100,67 @@ with tab_dashboard:
         use_container_width=True,
     )
 
-    # Für das Diagramm nur Kategorien mit mindestens einer Antwort anzeigen.
-    # Das verhindert eine leere 0%-Grafik mit vielen unlesbaren X-Achsen-Labels.
+    # Modernes interaktives Diagramm: nur Kategorien mit mindestens einer Antwort anzeigen.
+    # Dadurch entstehen keine überfüllten Achsen mehr und die Werte sind per Tooltip prüfbar.
     cat_chart = cat[cat["Gesamt"] > 0].copy()
 
     if cat_chart.empty:
         st.info("Noch keine Kategorie mit beantworteten Vokabeln vorhanden. Das Diagramm erscheint, sobald du Antworten gespeichert hast.")
     else:
         cat_chart["Kategorie"] = cat_chart["Kategorie"].astype(str).replace("", "Ohne Kategorie")
-        cat_chart["Trefferquote_%"] = cat_chart["Trefferquote"].fillna(0) * 100
+        cat_chart["Trefferquote_%"] = (cat_chart["Trefferquote"].fillna(0) * 100).round(1)
         cat_chart = cat_chart.sort_values("Trefferquote_%", ascending=True)
 
-        fig_height = max(4, len(cat_chart) * 0.38)
-        fig, ax = plt.subplots(figsize=(10, fig_height))
-        ax.barh(cat_chart["Kategorie"], cat_chart["Trefferquote_%"])
+        chart_height = max(420, len(cat_chart) * 34)
 
-        ax.set_xlabel("Trefferquote %")
-        ax.set_ylabel("")
-        ax.set_xlim(0, 100)
-        ax.set_title("Trefferquote je Kategorie")
+        fig = px.bar(
+            cat_chart,
+            x="Trefferquote_%",
+            y="Kategorie",
+            orientation="h",
+            text=cat_chart["Trefferquote_%"].map(lambda x: f"{x:.0f}%"),
+            hover_data={
+                "Trefferquote_%": ":.1f",
+                "Richtig": True,
+                "Falsch": True,
+                "Gesamt": True,
+                "Kategorie": False,
+            },
+            labels={
+                "Trefferquote_%": "Trefferquote (%)",
+                "Kategorie": "",
+            },
+            title="Trefferquote je Kategorie",
+        )
 
-        for i, value in enumerate(cat_chart["Trefferquote_%"]):
-            label_x = min(value + 1, 98)
-            ax.text(label_x, i, f"{value:.0f}%", va="center")
+        fig.update_traces(
+            textposition="outside",
+            marker_line_width=0,
+            opacity=0.9,
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Trefferquote: %{x:.1f}%<br>"
+                "Richtig: %{customdata[1]}<br>"
+                "Falsch: %{customdata[2]}<br>"
+                "Gesamt: %{customdata[3]}"
+                "<extra></extra>"
+            ),
+        )
 
-        plt.tight_layout()
-        st.pyplot(fig)
+        fig.update_layout(
+            height=chart_height,
+            margin=dict(l=10, r=40, t=70, b=20),
+            xaxis=dict(range=[0, 105], ticksuffix="%", showgrid=True, zeroline=False),
+            yaxis=dict(title="", automargin=True),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(size=13),
+            title=dict(x=0.0, xanchor="left"),
+            bargap=0.28,
+            showlegend=False,
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================
 # Admin
