@@ -65,6 +65,47 @@ SCOPES = [
 ]
 
 
+# ------------------------------------------------------------
+# 🔐 Passwortschutz
+# ------------------------------------------------------------
+
+def check_password():
+    """Einfache Passwortabfrage für die Streamlit-App."""
+
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
+    if st.session_state.password_correct:
+        return True
+
+    st.title("🔐 Vokabeltrainer Login")
+    st.info("Bitte Passwort eingeben, um den Vokabeltrainer zu öffnen.")
+
+    password = st.text_input(
+        "Passwort",
+        type="password",
+        key="password_input"
+    )
+
+    if st.button("Einloggen"):
+        expected_password = st.secrets.get("APP_PASSWORD", "")
+
+        if password == expected_password and expected_password != "":
+            st.session_state.password_correct = True
+            st.rerun()
+        else:
+            st.error("❌ Passwort ist falsch.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
+
+
+
+
+
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Stellt sicher, dass alle benötigten Spalten existieren."""
     for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.items():
@@ -1135,6 +1176,7 @@ with tab_dashboard:
 
         fig.update_traces(
             textposition="outside",
+            marker_color="#35D3DF",
             marker_line_width=0,
             opacity=0.9,
             hovertemplate=(
