@@ -55,15 +55,6 @@ SYNONYM_COLUMNS = {
     "Synonym_Notiz": "",
 }
 
-# ============================================================
-# Hilfsfunktionen: Google Sheets / Daten
-# ============================================================
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
 
 # ------------------------------------------------------------
 # 🔐 Passwortschutz
@@ -101,6 +92,21 @@ def check_password():
 
 if not check_password():
     st.stop()
+
+
+
+
+# ============================================================
+# Hilfsfunktionen: Google Sheets / Daten
+# ============================================================
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+
 
 
 
