@@ -21,7 +21,6 @@ from gspread.exceptions import WorksheetNotFound
 EXCEL_PATH = "vokabeln.xlsx"
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_AI_LEVEL = "mittel"
-HISTORY_BATCH_SIZE = 10  # Lernhistorie wird gesammelt und erst ab dieser Anzahl geschrieben
 
 BASE_COLUMNS = {
     "ID": "",
@@ -203,12 +202,23 @@ def google_sheets_configured() -> bool:
     return bool(get_google_sheet_id() and get_google_credentials_dict())
 
 
+@st.cache_resource(show_spinner=False)
+def get_google_client_cached(creds_json: str):
+    """Cached Google-Client, damit die Authentifizierung nicht bei jedem Rerun neu aufgebaut wird."""
+    creds_dict = json.loads(creds_json)
+    if "private_key" in creds_dict:
+        creds_dict["private_key"] = str(creds_dict["private_key"]).replace("\\n", "\n")
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
 def get_google_client():
     creds_dict = get_google_credentials_dict()
     if not creds_dict:
         raise RuntimeError("Google-Service-Account fehlt in Streamlit Secrets unter [gcp_service_account].")
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
+
+    creds_json = json.dumps(creds_dict, sort_keys=True)
+    return get_google_client_cached(creds_json)
 
 
 def get_vocab_worksheet():
@@ -244,7 +254,7 @@ def ensure_excel_exists() -> None:
         df.to_excel(EXCEL_PATH, index=False)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_data_cached(source_key: str) -> pd.DataFrame:
     """Lädt Vokabeln aus Google Sheets. Falls nicht konfiguriert: lokaler Excel-Fallback."""
     if google_sheets_configured():
@@ -302,6 +312,7 @@ def load_data() -> pd.DataFrame:
 
 
 def save_data(df: pd.DataFrame) -> None:
+    """Speichert die komplette Vokabelliste. Nur für große Änderungen nutzen."""
     df = ensure_columns(df.copy()).fillna("")
 
     if google_sheets_configured():
@@ -315,6 +326,73 @@ def save_data(df: pd.DataFrame) -> None:
         df.to_excel(EXCEL_PATH, index=False)
 
     st.cache_data.clear()
+
+
+def _column_letter(col_count: int) -> str:
+    """Hilfsfunktion: Spaltennummer -> Google-Sheets-Spaltenbuchstabe."""
+    return re.sub(r"\d+", "", gspread.utils.rowcol_to_a1(1, int(col_count)))
+
+
+def update_google_sheet_row(df: pd.DataFrame, row_idx: int) -> None:
+    """
+    Aktualisiert nur eine einzelne Datenzeile in Google Sheets.
+    Das ist deutlich schneller als save_data(df), weil nicht das komplette Sheet neu geschrieben wird.
+    """
+    df_clean = ensure_columns(df.copy()).fillna("")
+
+    if not google_sheets_configured():
+        save_data(df_clean)
+        return
+
+    ws = get_vocab_worksheet()
+    headers = df_clean.columns.tolist()
+
+    current_headers = ws.row_values(1)
+    if current_headers != headers:
+        # Falls sich Spalten geändert haben, ist ein Vollspeichern sicherer.
+        save_data(df_clean)
+        return
+
+    google_row_number = int(row_idx) + 2  # Zeile 1 = Header
+    row_values = df_clean.loc[row_idx, headers].astype(str).tolist()
+    end_col = _column_letter(len(headers))
+    cell_range = f"A{google_row_number}:{end_col}{google_row_number}"
+
+    ws.update(values=[row_values], range_name=cell_range)
+    st.cache_data.clear()
+
+
+def append_vocab_rows(df_current: pd.DataFrame, rows_to_add: list[dict]) -> pd.DataFrame:
+    """
+    Fügt neue Vokabelzeilen an, ohne das komplette Google Sheet neu zu schreiben.
+    Gibt den kombinierten DataFrame zurück.
+    """
+    if not rows_to_add:
+        return df_current
+
+    df_current_clean = ensure_columns(df_current.copy()).fillna("")
+    new_rows_df = ensure_columns(pd.DataFrame(rows_to_add)).fillna("")
+    new_rows_df = new_rows_df.reindex(columns=df_current_clean.columns, fill_value="")
+
+    combined = pd.concat([df_current_clean, new_rows_df], ignore_index=True)
+    combined = ensure_columns(combined).fillna("")
+
+    if google_sheets_configured():
+        ws = get_vocab_worksheet()
+        headers = combined.columns.tolist()
+        current_headers = ws.row_values(1)
+
+        if current_headers != headers:
+            # Falls Header nicht passen, einmal sauber vollständig schreiben.
+            save_data(combined)
+        else:
+            rows_values = new_rows_df.reindex(columns=headers, fill_value="").astype(str).values.tolist()
+            ws.append_rows(rows_values, value_input_option="USER_ENTERED")
+            st.cache_data.clear()
+    else:
+        save_data(combined)
+
+    return combined
 
 
 def find_row_index(df: pd.DataFrame, word_id: str) -> int | None:
@@ -357,7 +435,7 @@ def get_settings_worksheet():
         return None
     return get_or_create_worksheet("Einstellungen", SETTINGS_COLUMNS, rows=100, cols=5)
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_history_cached(source_key: str) -> pd.DataFrame:
     if google_sheets_configured():
         ws = get_history_worksheet()
@@ -389,7 +467,7 @@ def load_history() -> pd.DataFrame:
         source_key = f"history_local:{os.path.getmtime(path) if os.path.exists(path) else 0}"
     return load_history_cached(source_key).copy()
 
-def build_learning_event_row(
+def append_learning_event(
     word_id: str,
     deutsch: str,
     englisch: str,
@@ -399,10 +477,10 @@ def build_learning_event_row(
     erwartete_antwort: str,
     korrekt: bool,
     hinweis: str = "",
-) -> list[str]:
-    """Erzeugt eine Zeile für die Lernhistorie, schreibt sie aber noch nicht weg."""
+) -> None:
+    """Schreibt eine Antwort in die Lernhistorie."""
     now = datetime.now()
-    return [
+    row_values = [
         now.strftime("%Y-%m-%d %H:%M:%S"),
         now.strftime("%Y-%m-%d"),
         str(word_id),
@@ -416,94 +494,16 @@ def build_learning_event_row(
         str(hinweis),
     ]
 
-
-def ensure_pending_history_state() -> None:
-    """Initialisiert den lokalen Puffer für Lernhistorien-Einträge."""
-    if "pending_history_events" not in st.session_state:
-        st.session_state.pending_history_events = []
-
-
-def pending_history_count() -> int:
-    ensure_pending_history_state()
-    return len(st.session_state.pending_history_events)
-
-
-def flush_learning_history() -> int:
-    """
-    Schreibt gepufferte Lernhistorien-Einträge gesammelt weg.
-    Rückgabe: Anzahl geschriebener Einträge.
-    """
-    ensure_pending_history_state()
-    pending = list(st.session_state.pending_history_events)
-
-    if not pending:
-        return 0
-
     if google_sheets_configured():
         ws = get_history_worksheet()
-        ws.append_rows(pending, value_input_option="USER_ENTERED")
+        ws.append_row(row_values, value_input_option="USER_ENTERED")
     else:
         path = "lernhistorie.csv"
         hist = load_history()
-        new_rows = [dict(zip(HISTORY_COLUMNS, row_values)) for row_values in pending]
-        hist = pd.concat([hist, pd.DataFrame(new_rows)], ignore_index=True)
+        hist = pd.concat([hist, pd.DataFrame([dict(zip(HISTORY_COLUMNS, row_values))])], ignore_index=True)
         hist.to_csv(path, index=False)
 
-    st.session_state.pending_history_events = []
     st.cache_data.clear()
-    return len(pending)
-
-
-def append_learning_event(
-    word_id: str,
-    deutsch: str,
-    englisch: str,
-    kategorie: str,
-    modus: str,
-    antwort: str,
-    erwartete_antwort: str,
-    korrekt: bool,
-    hinweis: str = "",
-    flush_threshold: int = HISTORY_BATCH_SIZE,
-) -> None:
-    """
-    Puffert eine Antwort in der Lernhistorie.
-    Erst ab flush_threshold Einträgen wird gesammelt nach Google Sheets geschrieben.
-    """
-    ensure_pending_history_state()
-    st.session_state.pending_history_events.append(
-        build_learning_event_row(
-            word_id=word_id,
-            deutsch=deutsch,
-            englisch=englisch,
-            kategorie=kategorie,
-            modus=modus,
-            antwort=antwort,
-            erwartete_antwort=erwartete_antwort,
-            korrekt=korrekt,
-            hinweis=hinweis,
-        )
-    )
-
-    if pending_history_count() >= int(flush_threshold):
-        flush_learning_history()
-
-
-def history_with_pending(history: pd.DataFrame) -> pd.DataFrame:
-    """Kombiniert gespeicherte Lernhistorie mit noch nicht synchronisierten Session-Einträgen."""
-    ensure_pending_history_state()
-    if not st.session_state.pending_history_events:
-        return history
-
-    pending_df = pd.DataFrame(st.session_state.pending_history_events, columns=HISTORY_COLUMNS)
-    if history is None or history.empty:
-        return pending_df.fillna("")
-
-    for col in HISTORY_COLUMNS:
-        if col not in history.columns:
-            history[col] = ""
-    return pd.concat([history[HISTORY_COLUMNS], pending_df], ignore_index=True).fillna("")
-
 
 def get_setting_value(key: str, default: str = "") -> str:
     if google_sheets_configured():
@@ -1271,9 +1271,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Daten laden
-st.session_state.setdefault("pending_history_events", [])
 df = load_data()
-learning_history = history_with_pending(load_history())
+learning_history = load_history()
 
 try:
     daily_goal_default = int(get_setting_value("daily_goal", "20"))
@@ -1365,14 +1364,6 @@ with tab_home:
             st.progress(goal_progress)
             today_accuracy = (correct_today / max(answers_today, 1)) * 100
             st.caption(f"Heute richtig: {correct_today} von {answers_today} ({today_accuracy:.0f} %) · Streak: {streak_days} Tage")
-
-            pending_count = pending_history_count()
-            if pending_count > 0:
-                st.warning(f"⏳ {pending_count} Lernhistorien-Einträge sind noch nicht mit Google Sheets synchronisiert.")
-                if st.button("🔄 Lernhistorie jetzt synchronisieren", key="flush_history_home"):
-                    written = flush_learning_history()
-                    st.success(f"{written} Einträge wurden synchronisiert.")
-                    st.rerun()
 
         difficult_count = int(((home["Falsch"] > home["Richtig"]) & (home["Total"] > 0)).sum())
 
@@ -1597,7 +1588,7 @@ with tab_training:
             else:
                 df.at[idx, "Falsch"] = int(df.at[idx, "Falsch"]) + 1
             df.at[idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            save_data(df)
+            update_google_sheet_row(df, idx)
             append_learning_event(
                 word_id=st.session_state.current_word_id,
                 deutsch=vokabel_de,
@@ -1704,8 +1695,8 @@ with tab_training:
                         df.at[idx, "Synonyme_DE"] = "; ".join(syn_data.get("synonyme_de", []))
                         df.at[idx, "Antonyme_EN"] = "; ".join(syn_data.get("antonyme_en", []))
                         df.at[idx, "Synonym_Notiz"] = syn_data.get("notiz_de", "")
-                        save_data(df)
-                        st.success("Synonyme wurden in der Excel-Datei gespeichert.")
+                        update_google_sheet_row(df, idx)
+                        st.success("Synonyme wurden in Google Sheets gespeichert.")
                         st.rerun()
             with save_syn_col2:
                 if st.button("➕ Zu alternativen Antworten hinzufügen", use_container_width=True):
@@ -1714,7 +1705,7 @@ with tab_training:
                         existing = str(df.at[idx, "Alternative_Antworten"] or "").strip()
                         additions = "; ".join(syn_data.get("synonyme_en", []))
                         df.at[idx, "Alternative_Antworten"] = "; ".join([x for x in [existing, additions] if x])
-                        save_data(df)
+                        update_google_sheet_row(df, idx)
                         st.success("Synonyme wurden zusätzlich zu Alternative_Antworten hinzugefügt.")
                         st.rerun()
 
@@ -1771,7 +1762,7 @@ with tab_training:
                     df.at[idx, "Wortart"] = "verb" if verb_data.get("is_verb", False) else "kein Verb"
                     df.at[idx, "Verbformen_JSON"] = json.dumps(verb_data, ensure_ascii=False)
                     df.at[idx, "Verbformen_Notiz"] = str(verb_data.get("note_de", "")).strip()
-                    save_data(df)
+                    update_google_sheet_row(df, idx)
                     st.success("Verbformen wurden in Google Sheets gespeichert.")
                     st.rerun()
                 else:
@@ -1837,7 +1828,7 @@ with tab_training:
                                 slot = 1  # überschreibt ältesten Slot
                             df.at[idx, f"KI_DE_{slot}"] = ex["deutscher_satz"]
                             df.at[idx, f"KI_EN_{slot}"] = ex["englischer_satz"]
-                            save_data(df)
+                            update_google_sheet_row(df, idx)
                             st.success(f"Gespeichert in KI_DE_{slot}/KI_EN_{slot}.")
 
     # Statistik aktuelle Vokabel
@@ -1943,7 +1934,7 @@ with tab_test:
                     else:
                         df.at[real_idx, "Falsch"] = int(df.at[real_idx, "Falsch"]) + 1
                     df.at[real_idx, "Zuletzt_geuebt"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    save_data(df)
+                    update_google_sheet_row(df, real_idx)
                     append_learning_event(
                         word_id=str(row_t["ID"]),
                         deutsch=str(row_t["Deutsch"]),
@@ -2143,30 +2134,32 @@ with tab_admin:
                         "Synonyme_DE": new_syn_de.strip(),
                     })
 
-                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                    df = assign_missing_numeric_ids(df)
-                    save_data(df)
+                    append_vocab_rows(df, [new_row])
 
                     st.success(f"Vokabel gespeichert mit ID {new_id}.")
                     st.rerun()
 
     st.markdown("### Daten bearbeiten")
-    st.caption("Änderungen in dieser Tabelle werden nach Klick auf 'Änderungen speichern' in Google Sheets gespeichert.")
+    st.caption("Die große Bearbeitungstabelle wird erst geöffnet, wenn du sie wirklich brauchst. Das reduziert Ladezeit im Admin-Bereich.")
 
-    edited = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="data_editor"
-    )
+    edited = df.copy()
 
-    if st.button("💾 Änderungen speichern"):
-        edited = ensure_columns(edited.copy())
-        edited = assign_missing_numeric_ids(edited)
-        save_data(edited)
+    with st.expander("📋 Tabelle bearbeiten", expanded=False):
+        st.caption("Änderungen werden erst nach Klick auf 'Änderungen speichern' in Google Sheets gespeichert.")
+        edited = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="data_editor"
+        )
 
-        st.success("Google Sheet aktualisiert.")
-        st.rerun()
+        if st.button("💾 Änderungen speichern"):
+            edited = ensure_columns(edited.copy())
+            edited = assign_missing_numeric_ids(edited)
+            save_data(edited)
+
+            st.success("Google Sheet aktualisiert.")
+            st.rerun()
 
     with st.expander("⬇️ Vokabelliste als Excel herunterladen"):
         buffer = BytesIO()
@@ -2293,8 +2286,7 @@ with tab_generator:
                         rows_to_add.append(new_row)
 
                     if rows_to_add:
-                        df_new = pd.concat([df, pd.DataFrame(rows_to_add)], ignore_index=True)
-                        save_data(df_new)
+                        append_vocab_rows(df, rows_to_add)
                         st.success(f"{len(rows_to_add)} neue Vokabeln wurden in Google Sheets gespeichert.")
                         if skipped_duplicates:
                             st.info("Übersprungene Duplikate: " + "; ".join(skipped_duplicates[:10]))
@@ -2344,20 +2336,6 @@ auth_uri = "https://accounts.google.com/o/oauth2/auth"
 token_uri = "https://oauth2.googleapis.com/token"
 auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 client_x509_cert_url = "...""", language="toml")
-
-    st.markdown("### Lernhistorie / Performance")
-    st.write(f"Ausstehende Lernhistorien-Einträge im lokalen Session-Puffer: **{pending_history_count()}**")
-    st.caption(
-        f"Die Lernhistorie wird gesammelt geschrieben. Automatische Synchronisierung ab {HISTORY_BATCH_SIZE} Einträgen "
-        "oder manuell per Button."
-    )
-    if st.button("🔄 Lernhistorie jetzt synchronisieren", key="flush_history_settings"):
-        written = flush_learning_history()
-        if written:
-            st.success(f"{written} Einträge wurden nach Google Sheets geschrieben.")
-            st.rerun()
-        else:
-            st.info("Keine ausstehenden Lernhistorien-Einträge vorhanden.")
 
     st.markdown("### Kostenkontrolle")
     st.write(
