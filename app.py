@@ -191,7 +191,13 @@ def get_vocab_worksheet():
 
     sheet_name = get_google_sheet_name()
     gc = get_google_client()
-    sh = gc.open_by_key(sheet_id)
+    try:
+        sh = gc.open_by_key(sheet_id)
+    except gspread.exceptions.APIError as e:
+        st.error("❌ Google Sheets konnte nicht geöffnet werden.")
+        st.info("Prüfe: GOOGLE_SHEET_ID, Freigabe an Service Account, echte Google-Tabelle.")
+        st.code(str(e), language="text")
+        st.stop()
 
     try:
         return sh.worksheet(sheet_name)
