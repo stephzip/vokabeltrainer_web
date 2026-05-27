@@ -21,8 +21,7 @@ from gspread.exceptions import WorksheetNotFound
 EXCEL_PATH = "vokabeln.xlsx"
 DEFAULT_MODEL = "gpt-4.1-mini"
 DEFAULT_AI_LEVEL = "mittel"
-SYNC_BATCH_SIZE = 999999  # Auto-Sync faktisch deaktiviert; manuelle Synchronisierung bleibt verfügbar
-AUTO_SYNC_ENABLED = False  # Verhindert Google-Sheets-Writes direkt beim Antworten
+SYNC_BATCH_SIZE = 10  # Anzahl Antworten, bevor automatisch nach Google Sheets synchronisiert wird
 
 BASE_COLUMNS = {
     "ID": "",
@@ -577,27 +576,12 @@ def append_learning_event(
 
 
 def maybe_auto_sync_pending(df: pd.DataFrame) -> tuple[int, int]:
-    """Synchronisiert optional automatisch, sobald genug Antworten gepuffert sind.
-
-    Für bessere Trainings-Performance ist Auto-Sync standardmäßig deaktiviert.
-    Dadurch wird beim Prüfen einer Antwort kein Google-Sheets-Write ausgelöst.
-    Die Synchronisierung erfolgt über den Button "Änderungen jetzt synchronisieren".
-    """
-    if not AUTO_SYNC_ENABLED:
-        return 0, 0
-
+    """Synchronisiert automatisch, sobald genug Antworten gepuffert sind."""
     if st.session_state.get("pending_answer_count", 0) < SYNC_BATCH_SIZE:
         return 0, 0
-
-    try:
-        vocab_count = flush_pending_vocab_updates(df)
-        history_count = flush_pending_history()
-        st.session_state.last_sync_error = ""
-        return vocab_count, history_count
-    except Exception as e:
-        # Wichtig: App nicht crashen lassen. Pending-Daten bleiben im Session-State erhalten.
-        st.session_state.last_sync_error = str(e)
-        return 0, 0
+    vocab_count = flush_pending_vocab_updates(df)
+    history_count = flush_pending_history()
+    return vocab_count, history_count
 
 
 def get_setting_value(key: str, default: str = "") -> str:
@@ -681,12 +665,6 @@ def render_sync_status(df: pd.DataFrame, location: str = "") -> None:
     pending_vocab = len(st.session_state.get("pending_vocab_updates", {}))
     pending_hist = len(st.session_state.get("pending_history_rows", []))
 
-    last_sync_error = str(st.session_state.get("last_sync_error", "")).strip()
-    if last_sync_error:
-        st.error("Die letzte Synchronisierung mit Google Sheets ist fehlgeschlagen. Deine Änderungen sind weiterhin lokal gepuffert.")
-        with st.expander("Technische Fehlermeldung anzeigen", expanded=False):
-            st.code(last_sync_error, language="text")
-
     if pending_vocab == 0 and pending_hist == 0:
         return
 
@@ -694,20 +672,11 @@ def render_sync_status(df: pd.DataFrame, location: str = "") -> None:
         f"⏳ Noch nicht synchronisiert: {pending_vocab} Vokabeländerung(en), "
         f"{pending_hist} Historieneintrag/Einträge."
     )
-    st.caption("Für maximale Geschwindigkeit wird beim Antworten nicht sofort in Google Sheets gespeichert. Synchronisiere am Ende deiner Lernrunde manuell.")
-
     if st.button("🔄 Änderungen jetzt synchronisieren", key=f"sync_now_{location}"):
-        try:
-            saved_vocab = flush_pending_vocab_updates(df)
-            saved_hist = flush_pending_history()
-            st.session_state.last_sync_error = ""
-            st.success(f"Synchronisiert: {saved_vocab} Vokabelzeile(n), {saved_hist} Historieneintrag/Einträge.")
-            st.rerun()
-        except Exception as e:
-            st.session_state.last_sync_error = str(e)
-            st.error("Synchronisierung fehlgeschlagen. Die Änderungen bleiben lokal gepuffert und gehen erst beim Schließen der Session verloren.")
-            with st.expander("Technische Fehlermeldung anzeigen", expanded=True):
-                st.code(str(e), language="text")
+        saved_vocab = flush_pending_vocab_updates(df)
+        saved_hist = flush_pending_history()
+        st.success(f"Synchronisiert: {saved_vocab} Vokabelzeile(n), {saved_hist} Historieneintrag/Einträge.")
+        st.rerun()
 
 
 # ============================================================
@@ -1435,7 +1404,6 @@ st.session_state.setdefault("test_direction", "Deutsch → Englisch")
 st.session_state.setdefault("pending_vocab_updates", {})
 st.session_state.setdefault("pending_history_rows", [])
 st.session_state.setdefault("pending_answer_count", 0)
-st.session_state.setdefault("last_sync_error", "")
 
 # Noch nicht synchronisierte Änderungen in den geladenen DataFrame einblenden
 df = apply_pending_vocab_updates_to_df(df)
