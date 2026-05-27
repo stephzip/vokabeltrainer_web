@@ -56,6 +56,48 @@ SYNONYM_COLUMNS = {
 }
 
 
+# ------------------------------------------------------------
+# 🔐 Passwortschutz
+# ------------------------------------------------------------
+
+def check_password():
+    """Einfache Passwortabfrage für die Streamlit-App."""
+
+    if "password_correct" not in st.session_state:
+        st.session_state.password_correct = False
+
+    if st.session_state.password_correct:
+        return True
+
+    st.title("🔐 Vokabeltrainer Login")
+    st.info("Bitte Passwort eingeben, um den Vokabeltrainer zu öffnen.")
+
+    password = st.text_input(
+        "Passwort",
+        type="password",
+        key="password_input"
+    )
+
+    if st.button("Einloggen"):
+        expected_password = st.secrets.get("APP_PASSWORD", "")
+
+        if password.strip() == str(expected_password).strip() and expected_password != "":
+            st.session_state.password_correct = True
+            st.rerun()
+        else:
+            st.error("❌ Passwort ist falsch.")
+
+    return False
+
+
+if not check_password():
+    st.stop()
+
+
+
+
+
+
 # ============================================================
 # Hilfsfunktionen: Google Sheets / Daten
 # ============================================================
@@ -214,42 +256,7 @@ def find_row_index(df: pd.DataFrame, word_id: str) -> int | None:
 
 
 
-# ------------------------------------------------------------
-# 🔐 Passwortschutz
-# ------------------------------------------------------------
 
-def check_password():
-    """Einfache Passwortabfrage für die Streamlit-App."""
-
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
-
-    if st.session_state.password_correct:
-        return True
-
-    st.title("🔐 Vokabeltrainer Login")
-    st.info("Bitte Passwort eingeben, um den Vokabeltrainer zu öffnen.")
-
-    password = st.text_input(
-        "Passwort",
-        type="password",
-        key="password_input"
-    )
-
-    if st.button("Einloggen"):
-        expected_password = st.secrets.get("APP_PASSWORD", "")
-
-        if password.strip() == str(expected_password).strip() and expected_password != "":
-            st.session_state.password_correct = True
-            st.rerun()
-        else:
-            st.error("❌ Passwort ist falsch.")
-
-    return False
-
-
-if not check_password():
-    st.stop()
 
 
 
