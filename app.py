@@ -72,6 +72,13 @@ def check_password():
     st.title("🔐 Vokabeltrainer Login")
     st.info("Bitte Passwort eingeben, um den Vokabeltrainer zu öffnen.")
 
+    # Prüfen, ob das Secret überhaupt vorhanden ist
+    if "APP_PASSWORD" not in st.secrets:
+        st.error("❌ APP_PASSWORD wurde in den Streamlit Secrets nicht gefunden.")
+        st.stop()
+
+    expected_password = str(st.secrets["APP_PASSWORD"]).strip()
+
     password = st.text_input(
         "Passwort",
         type="password",
@@ -79,9 +86,9 @@ def check_password():
     )
 
     if st.button("Einloggen"):
-        expected_password = st.secrets.get("APP_PASSWORD", "")
+        entered_password = str(password).strip()
 
-        if password.strip() == str(expected_password).strip() and expected_password != "":
+        if entered_password == expected_password:
             st.session_state.password_correct = True
             st.rerun()
         else:
