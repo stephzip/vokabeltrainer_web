@@ -119,22 +119,38 @@ SCOPES = [
 
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Stellt sicher, dass alle benötigten Spalten existieren."""
+    df = df.copy()
+
     for col, default in {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.items():
         if col not in df.columns:
             df[col] = default
 
-    # IDs ergänzen, falls leer
+    # IDs ergänzen, falls leer oder ungültig
     if "ID" in df.columns:
+        numeric_ids = pd.to_numeric(df["ID"], errors="coerce")
+        max_id = numeric_ids.max()
+
+        if pd.isna(max_id):
+            next_id = 1
+        else:
+            next_id = int(max_id) + 1
+
         for idx in df.index:
-            if pd.isna(df.at[idx, "ID"]) or str(df.at[idx, "ID"]).strip() == "":
-                df.at[idx, "ID"] = f"W{idx + 1:05d}"
+            current_id = pd.to_numeric(df.at[idx, "ID"], errors="coerce")
+
+            if pd.isna(current_id):
+                df.at[idx, "ID"] = next_id
+                next_id += 1
+            else:
+                df.at[idx, "ID"] = int(current_id)
 
     # numerische Spalten robust machen
     for col in ["Richtig", "Falsch"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     # Textspalten robust machen
-    text_cols = [c for c in df.columns if c not in ["Richtig", "Falsch"]]
+    text_cols = [c for c in df.columns if c not in ["Richtig", "Falsch", "ID"]]
     for col in text_cols:
         df[col] = df[col].fillna("")
 
@@ -677,9 +693,18 @@ def is_duplicate_word(df: pd.DataFrame, deutsch: str, englisch: str) -> bool:
     return bool((existing_de.eq(de_norm) | existing_en.eq(en_norm)).any())
 
 
-def build_new_word_id(df: pd.DataFrame, offset: int = 1) -> str:
-    """Erzeugt eine robuste neue ID."""
-    return f"W{len(df) + offset:05d}_{int(time.time())}"
+def build_new_word_id(df: pd.DataFrame, offset: int = 1) -> int:
+    """Erzeugt eine einfache fortlaufende numerische ID."""
+    if "ID" not in df.columns or df.empty:
+        return offset
+
+    numeric_ids = pd.to_numeric(df["ID"], errors="coerce")
+    max_id = numeric_ids.max()
+
+    if pd.isna(max_id):
+        return offset
+
+    return int(max_id) + offset
 
 def create_cloze_sentence(sentence: str, word_en: str) -> str:
     """Einfacher Lückentext: ersetzt die Vokabel oder einzelne Bestandteile."""
