@@ -254,7 +254,7 @@ def load_data_cached(source_key: str) -> pd.DataFrame:
             # Komplett leere Zeilen entfernen
             df = df.dropna(how="all")
             df = df[~(df.astype(str).apply(lambda row: "".join(row).strip(), axis=1) == "")]
-            
+
         if df.empty:
             df = pd.DataFrame(columns=list({**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}.keys()))
         return ensure_columns(df)
@@ -701,6 +701,48 @@ def create_cloze_sentence(sentence: str, word_en: str) -> str:
             return pattern.sub("_____", sentence, count=1)
 
     return sentence + "  → _____"
+
+def get_next_numeric_id(df):
+    """Ermittelt die nächste einfache numerische ID aus der bestehenden ID-Spalte."""
+    if "ID" not in df.columns or df.empty:
+        return 1
+
+    numeric_ids = pd.to_numeric(df["ID"], errors="coerce")
+    max_id = numeric_ids.max()
+
+    if pd.isna(max_id):
+        return 1
+
+    return int(max_id) + 1
+
+def assign_missing_numeric_ids(df):
+    """
+    Vergibt einfache fortlaufende IDs für Zeilen, bei denen ID leer oder ungültig ist.
+    Bestehende numerische IDs bleiben unverändert.
+    """
+    df = df.copy()
+
+    if "ID" not in df.columns:
+        df["ID"] = ""
+
+    numeric_ids = pd.to_numeric(df["ID"], errors="coerce")
+    max_id = numeric_ids.max()
+
+    if pd.isna(max_id):
+        next_id = 1
+    else:
+        next_id = int(max_id) + 1
+
+    for idx in df.index:
+        current_id = pd.to_numeric(df.at[idx, "ID"], errors="coerce")
+
+        if pd.isna(current_id):
+            df.at[idx, "ID"] = next_id
+            next_id += 1
+        else:
+            df.at[idx, "ID"] = int(current_id)
+
+    return df
 
 # ============================================================
 # UI Setup
@@ -1274,12 +1316,14 @@ with tab_admin:
             new_syn_en = st.text_input("Synonyme Englisch (mit Semikolon trennen)")
             new_syn_de = st.text_input("Synonyme Deutsch (mit Semikolon trennen)")
             submitted = st.form_submit_button("Speichern")
+
             if submitted:
                 if not new_de.strip() or not new_en.strip():
                     st.warning("Deutsch und Englisch müssen gefüllt sein.")
                 else:
-                    new_id = f"W{len(df) + 1:05d}_{int(time.time())}"
-                    new_row = {**BASE_COLUMNS, **KI_COLUMNS}
+                    new_id = get_next_numeric_id(df)
+
+                    new_row = {**BASE_COLUMNS, **KI_COLUMNS, **SYNONYM_COLUMNS}
                     new_row.update({
                         "ID": new_id,
                         "Deutsch": new_de.strip(),
@@ -1290,16 +1334,29 @@ with tab_admin:
                         "Synonyme_EN": new_syn_en.strip(),
                         "Synonyme_DE": new_syn_de.strip(),
                     })
+
                     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                    df = assign_missing_numeric_ids(df)
                     save_data(df)
-                    st.success("Vokabel gespeichert.")
+
+                    st.success(f"Vokabel gespeichert mit ID {new_id}.")
                     st.rerun()
 
     st.markdown("### Daten bearbeiten")
     st.caption("Änderungen in dieser Tabelle werden nach Klick auf 'Änderungen speichern' in Google Sheets gespeichert.")
-    edited = st.data_editor(df, num_rows="dynamic", use_container_width=True, key="data_editor")
+
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="data_editor"
+    )
+
     if st.button("💾 Änderungen speichern"):
+        edited = ensure_columns(edited.copy())
+        edited = assign_missing_numeric_ids(edited)
         save_data(edited)
+
         st.success("Google Sheet aktualisiert.")
         st.rerun()
 
@@ -1307,6 +1364,7 @@ with tab_admin:
         buffer = BytesIO()
         ensure_columns(edited.copy()).to_excel(buffer, index=False)
         buffer.seek(0)
+
         st.download_button(
             "vokabeln.xlsx herunterladen",
             data=buffer,
