@@ -91,7 +91,7 @@ def check_password():
     if st.button("Einloggen"):
         expected_password = st.secrets.get("APP_PASSWORD", "")
 
-        if password == expected_password and expected_password != "":
+        if password.strip() == str(expected_password).strip() and expected_password != "":
             st.session_state.password_correct = True
             st.rerun()
         else:
