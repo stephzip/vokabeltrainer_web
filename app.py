@@ -139,10 +139,10 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             current_id = pd.to_numeric(df.at[idx, "ID"], errors="coerce")
 
             if pd.isna(current_id):
-                df.at[idx, "ID"] = next_id
+                df.at[idx, "ID"] = str(next_id)
                 next_id += 1
             else:
-                df.at[idx, "ID"] = int(current_id)
+                df.at[idx, "ID"] = str(int(current_id))
 
     # numerische Spalten robust machen
     for col in ["Richtig", "Falsch"]:
@@ -150,9 +150,9 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     # Textspalten robust machen
-    text_cols = [c for c in df.columns if c not in ["Richtig", "Falsch", "ID"]]
+    text_cols = [c for c in df.columns if c not in ["Richtig", "Falsch"]]
     for col in text_cols:
-        df[col] = df[col].fillna("")
+        df[col] = df[col].fillna("").astype(str)
 
     return df
 
